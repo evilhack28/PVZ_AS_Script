@@ -193,7 +193,14 @@ def main() -> None:
                           ', '.join(dict.fromkeys([_bin_dir, _cwd, _script_dir])))
 
     if meta_source:
-        from anim_meta import AnimMeta
+        try:
+            from anim_meta import AnimMeta
+        except ImportError:
+            log.warning("anim_meta module not found – metadata support disabled.")
+            meta_source = None
+            AnimMeta = None
+
+    if meta_source and AnimMeta is not None:
         log.info("Loading animation metadata: %s", meta_source)
         anim_meta = AnimMeta.load(action_tsv=meta_source, particle_tsv=meta_source)
         if anim_meta.is_empty():

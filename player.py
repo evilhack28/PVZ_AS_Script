@@ -441,7 +441,7 @@ class Player:
                 meta_cfg.scale, meta_cfg.offset_x, meta_cfg.offset_y,
                 'Y' if meta_cfg.flip else 'N')
         else:
-            fmt = self.rawbin_tag if hasattr(self, 'rawbin_tag') else ''
+            fmt = ' [RawBin]' if self.renderer.rawbin else ''
             line3 = "MC idx={}  frames={}  action {}-{}{}".format(
                 mc_idx, len(mc['frames']), action_start, action_end, fmt)
 
@@ -601,12 +601,15 @@ class Player:
                 if self._fps_input_active:
                     if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
                         if self._fps_input_buf:
-                            val = int(self._fps_input_buf)
-                            if val > 0:
-                                self.fps_custom  = val
-                                self.fps_mode    = 'custom'
-                                self._gif_msg    = f"FPS mode: CUSTOM ({self.fps_custom})"
-                                self._gif_msg_ttl = 120
+                            try:
+                                val = int(self._fps_input_buf)
+                                if val > 0:
+                                    self.fps_custom  = val
+                                    self.fps_mode    = 'custom'
+                                    self._gif_msg    = f"FPS mode: CUSTOM ({self.fps_custom})"
+                                    self._gif_msg_ttl = 120
+                            except ValueError:
+                                pass
                         self._fps_input_active = False
                         self._fps_input_buf    = ""
                     elif event.key == pygame.K_ESCAPE:
@@ -620,11 +623,14 @@ class Player:
                 if self._frame_input_active:
                     if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
                         if self._frame_input_buf:
-                            target = int(self._frame_input_buf)
-                            target = max(action_start,
-                                         min(action_end, action_start + target))
-                            self._step_frame_idx = target
-                            self.paused = True
+                            try:
+                                target = int(self._frame_input_buf)
+                                target = max(action_start,
+                                             min(action_end, action_start + target))
+                                self._step_frame_idx = target
+                                self.paused = True
+                            except ValueError:
+                                pass
                         self._frame_input_active = False
                         self._frame_input_buf    = ""
                     elif event.key == pygame.K_ESCAPE:

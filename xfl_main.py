@@ -113,7 +113,7 @@ def main():
     print("=" * 60)
     print("Done!")
     print(f"  XFL folder : {xfl_path}")
-    print(f'  XFL folder : {xfl_path}')
+    print(f"  FLA file   : {fla_path}")
     print("=" * 60)
 
 

@@ -13,7 +13,7 @@ Changes from v2
 
 import math
 import logging
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -22,7 +22,7 @@ import pygame
 log = logging.getLogger(__name__)
 
 # ── Constants ────────────────────────────────────────────────────────────────
-MAX_CACHE_SIZE = 512
+MAX_CACHE_SIZE = 2048
 
 # ── Per-sprite name overrides ─────────────────────────────────────────────────
 _NAME_OVERRIDES = {
@@ -173,18 +173,17 @@ class Renderer:
         # at different depths) so we only dedup image elements.
         # Guard: only apply when there are actual image-id duplicates.
         else:
-            from collections import Counter
-            img_id_counts = Counter(
-                elem['id'] for elem in elements if not elem['is_mc']
-            )
-            if any(c > 1 for c in img_id_counts.values()):
-                seen_img: dict = {}
-                deduped = []
-                for i, elem in enumerate(elements):
-                    if not elem['is_mc']:
-                        seen_img[elem['id']] = i   # last index wins
-                    # MC elements are always kept as-is
-                # Rebuild: keep all MCs in original order, keep last of each image id
+            # Single-pass: collect last index for each image id.
+            # Only rebuild elements list if duplicates actually exist.
+            seen_img: dict = {}
+            has_dup = False
+            for i, elem in enumerate(elements):
+                if not elem['is_mc']:
+                    eid = elem['id']
+                    if eid in seen_img:
+                        has_dup = True
+                    seen_img[eid] = i  # last index wins
+            if has_dup:
                 kept_img = set(seen_img.values())
                 elements = [elem for i, elem in enumerate(elements)
                             if elem['is_mc'] or i in kept_img]
