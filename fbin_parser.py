@@ -105,6 +105,25 @@ def _parse_impl(data: bytes, *, has_transform: bool, order_variant: str):
         if not movie_clips and images:
             movie_clips = [_make_pseudo_clip("PseudoClip", images)]
 
+        # ── Validate: buffer should be mostly consumed ────────────────────────
+        # If the wrong variant was selected (e.g. has_transform=True on a file
+        # that has no per-clip frame_rate field), the extra reads shift all
+        # subsequent positions, leaving unconsumed bytes at the end.
+        # More than 16 trailing bytes strongly indicates the wrong variant.
+        remaining = buf.length - buf.tell()
+        if remaining > 16:
+            log.debug("Parse attempt (%s) rejected: %d trailing bytes unconsumed.",
+                      tag, remaining)
+            return None
+
+        # ── Validate: all action mc_idx must be in range ──────────────────────
+        for action in actions:
+            if not (0 <= action.get('mc_idx', -1) < len(movie_clips)):
+                log.debug("Parse attempt (%s) rejected: action '%s' mc_idx=%d out of range "
+                          "(have %d clips).", tag, action.get('name', '?'),
+                          action.get('mc_idx', -1), len(movie_clips))
+                return None
+
         log.info("[%s] Parsed %d images, %d clips, %d actions.",
                  tag, len(images), len(movie_clips), len(actions))
         return images, movie_clips, actions

@@ -80,8 +80,14 @@ def _parse_impl(data: bytes):
         vals   = struct.unpack_from('<8f', data, offset); offset += 32
         off_x, off_y = vals[0], vals[1]
         w,     h     = vals[2], vals[3]
-        if w > 0 and abs(off_x) > w + 2: off_x = 0.0
-        if h > 0 and abs(off_y) > h + 2: off_y = 0.0
+        # RawBin element matrices already carry the world position (tx, ty).
+        # The image-record offset_x/offset_y is an internal anchor within the
+        # sprite, NOT a Flash registration point.  Values that exceed the sprite
+        # dimensions are artefacts of the export tool and must be clamped to 0
+        # so the sprite is placed at the element's world position.
+        # (FBIN keeps registration points unclamped — see fbin_parser.py.)
+        if w > 0 and abs(off_x) >= w: off_x = 0.0
+        if h > 0 and abs(off_y) >= h: off_y = 0.0
         log.debug("RawBin image '%s': tex=(%g,%g) size=(%g×%g) offset=(%g,%g)",
                   name, vals[4], vals[5], w, h, off_x, off_y)
         images.append({
