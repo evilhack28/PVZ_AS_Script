@@ -72,6 +72,8 @@ class Renderer:
         self._cache: OrderedDict = OrderedDict()
         # Set by Player before each action to suppress named body parts
         self.hidden_parts: frozenset = frozenset()
+        # Populated at the start of each draw() call (top-level only)
+        self._plane_imgs: set = set()
 
     # ── Public draw call ──────────────────────────────────────────────────────
 

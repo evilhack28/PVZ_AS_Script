@@ -171,7 +171,6 @@ def _walk(images, movie_clips, mc_idx, frame_num, matrix,
             rows.append((depth, f"[DEDUP-RAWBIN] dropped {dropped} superseded placement(s) "
                                  f"in MC[{mc_idx}] '{mc['name']}'"))
     elif not rawbin and dedup:
-        from collections import Counter
         img_id_counts = Counter(elem['id'] for elem in elements if not elem['is_mc'])
         if any(c > 1 for c in img_id_counts.values()):
             seen_img: dict = {}

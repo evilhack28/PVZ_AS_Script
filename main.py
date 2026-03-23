@@ -214,8 +214,9 @@ def main() -> None:
     pygame.display.set_mode((1, 1), pygame.NOFRAME)
 
     # ── Load texture ──────────────────────────────────────────────────────────
-    texture  = None
-    tex_stem = bin_stem
+    texture   = None
+    tex_stem  = bin_stem
+    _pvr_info = None
 
     if args.atlas:
         log.info("Loading atlas image: %s", args.atlas)
@@ -237,7 +238,7 @@ def main() -> None:
         tex_stem = os.path.splitext(os.path.basename(args.pvr))[0]
 
     # ── Texture summary ───────────────────────────────────────────────────────
-    if args.pvr and '_pvr_info' in dir() and _pvr_info:
+    if args.pvr and _pvr_info is not None:
         p      = _pvr_info
         status = "OK" if texture is not None else "FAILED"
         tex_lines = [

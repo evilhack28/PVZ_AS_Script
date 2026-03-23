@@ -16,3 +16,4 @@ node_modules/python/README.md
 node_modules/python/test/python.test.js
 package-lock.json
 package.json
+/__pycache__

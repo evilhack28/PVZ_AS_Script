@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 
 log = logging.getLogger(__name__)
 
@@ -90,7 +91,6 @@ def export_media(images: list, atlas, stem: str, media_dir: str,
             # e.g. "016_96x112" -> use stem+dimensions instead
             # e.g. "001_131x4"  -> "Zombie_Greetwall_King_131x4"
             raw = img.get("name", "").strip()
-            import re
             raw_stripped = re.sub(r'^\d+_', '', raw)  # remove "016_" prefix
             if raw_stripped and not re.match(r'^\d+x\d+$', raw_stripped):
                 # Has a real name after stripping prefix
