@@ -107,6 +107,10 @@ class Player:
         self._fps_input_active   = False
         self._fps_input_buf      = ""
 
+        # RawBin auto-centering: cache per mc_idx of (dx, dy) shift
+        self._rawbin_offsets: dict  = {}
+        self._rawbin_center_offset: tuple = (0.0, 0.0)
+
     # ── Meta helpers ──────────────────────────────────────────────────────────
 
     def _meta_for_action(self, action: dict):
@@ -173,7 +177,8 @@ class Player:
         cy = screen_h * 0.5
 
         if meta_cfg is None:
-            return (1.0, 0.0, 0.0, -1.0, cx, cy)
+            ox, oy = self._rawbin_center_offset
+            return (1.0, 0.0, 0.0, -1.0, cx - ox, cy - oy)
 
         s   = meta_cfg.scale if meta_cfg.scale > 0 else 1.0
         # offset_x/y represent the FOOT (ground contact) position within the
@@ -193,6 +198,46 @@ class Player:
         # Full affine: (a, b, c, d, tx, ty)
         #   a=sx, b=0, c=0, d=-s  (Y always flipped for screen), tx, ty
         return (sx, 0.0, 0.0, -s, tx, ty)
+
+    def _probe_rawbin_center(self, mc_idx: int,
+                             a_start: int, a_end: int) -> tuple:
+        """
+        Probe the union bounding box of a RawBin action to detect whether the
+        animation content is far off-centre (e.g. particle files that store
+        absolute game-world coordinates).  If the content centre deviates more
+        than 150 px from the probe canvas centre, return the (dx, dy) shift
+        needed to re-centre it; otherwise return (0, 0) (no correction).
+
+        The returned offset is subtracted from cx/cy in _base_transform so the
+        animation content lands at the middle of any canvas.
+        """
+        PROBE = 2048
+        cx    = float(PROBE // 2)
+        cy    = float(PROBE // 2)
+        base  = (1.0, 0.0, 0.0, -1.0, cx, cy)
+
+        probe_surf = pygame.Surface((PROBE, PROBE))
+        union      = BoundingBox()
+
+        for f in range(a_start, a_end + 1):
+            fb = BoundingBox()
+            self.renderer.draw(probe_surf, mc_idx, f, base, fb)
+            if fb.valid:
+                union.expand(pygame.Rect(
+                    int(fb.minx), int(fb.miny),
+                    max(1, int(fb.maxx - fb.minx)),
+                    max(1, int(fb.maxy - fb.miny))))
+
+        del probe_surf
+
+        if union.valid:
+            dx = (union.minx + union.maxx) / 2.0 - cx
+            dy = (union.miny + union.maxy) / 2.0 - cy
+            if abs(dx) > 150 or abs(dy) > 150:
+                log.debug("RawBin auto-centre: shift (%.1f, %.1f) for mc_idx=%d",
+                          dx, dy, mc_idx)
+                return (dx, dy)
+        return (0.0, 0.0)
 
     def _hidden_parts_for_action(self, action: dict) -> frozenset:
         """
@@ -311,6 +356,15 @@ class Player:
         # ── Metadata overrides ────────────────────────────────────────────────
         meta_cfg     = self._meta_for_action(action)
         hidden_parts = self._hidden_parts_for_action(action)
+
+        # RawBin auto-centering: probe action bounds once per mc_idx
+        if self.renderer.rawbin and meta_cfg is None:
+            if mc_idx not in self._rawbin_offsets:
+                self._rawbin_offsets[mc_idx] = self._probe_rawbin_center(
+                    mc_idx, action_start, action_end)
+            self._rawbin_center_offset = self._rawbin_offsets[mc_idx]
+        else:
+            self._rawbin_center_offset = (0.0, 0.0)
 
         # FPS resolved by current fps_mode (source / meta / custom)
         frame_rate = self._resolve_fps(action, mc)
