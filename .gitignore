@@ -17,3 +17,6 @@ node_modules/python/test/python.test.js
 package-lock.json
 package.json
 /__pycache__
+*.gif
+*.bin
+*.png
