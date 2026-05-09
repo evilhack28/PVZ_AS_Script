@@ -25,7 +25,10 @@ def main():
     p.add_argument("scale", nargs="?", default=None,
                    help="Scale factor: 1.28 (bigger) or 0.78 (smaller). "
                         "Negative value like -0.78 also accepted.")
-    p.add_argument("--fps",   default=None,   type=int, help="Frame rate override")
+    p.add_argument("--fps",        default=None, type=int, help="Frame rate override")
+    p.add_argument("--resolution", default=1536, type=int, choices=[1200, 1536],
+                   help="Output resolution: 1200 (native sprites, scale=1.0) or "
+                        "1536 (upscaled ×1.28, scale=0.78125) [default: 1536]")
     p.add_argument("--verbose", action="store_true", help="Enable debug logging")
     args = p.parse_args()
 
@@ -106,6 +109,7 @@ def main():
         fps=fps,
         rawbin=rawbin,
         scale=scale,
+        resolution=args.resolution,
     )
 
     fla_path = os.path.join(out_dir, stem + ".fla")

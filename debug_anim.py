@@ -171,16 +171,24 @@ def _walk(images, movie_clips, mc_idx, frame_num, matrix,
             rows.append((depth, f"[DEDUP-RAWBIN] dropped {dropped} superseded placement(s) "
                                  f"in MC[{mc_idx}] '{mc['name']}'"))
     elif not rawbin and dedup:
-        img_id_counts = Counter(elem['id'] for elem in elements if not elem['is_mc'])
-        if any(c > 1 for c in img_id_counts.values()):
-            seen_img: dict = {}
+        img_id_counts: dict = {}
+        for elem in elements:
+            if not elem['is_mc']:
+                eid = elem['id']
+                img_id_counts[eid] = img_id_counts.get(eid, 0) + 1
+        dedup_ids = {eid for eid, cnt in img_id_counts.items() if cnt == 2}
+        if dedup_ids:
+            last_pos: dict = {}
             for i, elem in enumerate(elements):
-                if not elem['is_mc']:
-                    seen_img[elem['id']] = i
-            kept_img = set(seen_img.values())
+                if not elem['is_mc'] and elem['id'] in dedup_ids:
+                    last_pos[elem['id']] = i
             before = len(elements)
-            elements = [elem for i, elem in enumerate(elements)
-                        if elem['is_mc'] or i in kept_img]
+            elements = [
+                elem for i, elem in enumerate(elements)
+                if elem['is_mc']
+                or elem['id'] not in dedup_ids
+                or i == last_pos[elem['id']]
+            ]
             dropped = before - len(elements)
             if dropped:
                 rows.append((depth, f"[DEDUP-FBIN] dropped {dropped} stale image placement(s) "
@@ -200,19 +208,43 @@ def _walk(images, movie_clips, mc_idx, frame_num, matrix,
             child_mc    = movie_clips[eid]
             child_frame = elem.get('frame_index', -1)
 
-            if rawbin and len(child_mc['frames']) == 1 and child_frame >= 0:
-                if child_frame < len(images):
+            if rawbin:
+                if eid == 1 and child_frame >= 0:
+                    # mc_id=1: redirect to body-part MC[child_frame]
+                    if child_frame < len(movie_clips):
+                        rows.append((depth,
+                            f"MC-REDIRECT  -> mc_idx={child_frame}  "
+                            f"name={movie_clips[child_frame]['name']!r}"))
+                        _walk(images, movie_clips, child_frame, frame_num,
+                              child_matrix, depth+1, visited, rows, rawbin, dedup)
+                    elif child_frame < len(images):
+                        img = images[child_frame]
+                        wx, wy = _world_pos(child_matrix, img)
+                        rows.append((depth,
+                            f"IMAGE  idx={child_frame:4d}  name={img['name']!r:40s}  "
+                            f"world=({wx:7.1f},{wy:7.1f})  "
+                            f"size=({int(img['width'])}x{int(img['height'])})"))
+                elif child_frame >= 0 and child_frame < len(images):
+                    # mc_id≠1: direct image draw
                     img = images[child_frame]
                     wx, wy = _world_pos(child_matrix, img)
                     rows.append((depth,
                         f"IMAGE  idx={child_frame:4d}  name={img['name']!r:40s}  "
                         f"world=({wx:7.1f},{wy:7.1f})  "
                         f"size=({int(img['width'])}x{int(img['height'])})"))
-                elif child_frame < len(movie_clips):
+                elif len(child_mc['frames']) == 1 and child_frame >= 0:
+                    if child_frame < len(movie_clips):
+                        rows.append((depth,
+                            f"MC-REDIRECT  -> mc_idx={child_frame}  "
+                            f"name={movie_clips[child_frame]['name']!r}"))
+                        _walk(images, movie_clips, child_frame, 0,
+                              child_matrix, depth+1, visited, rows, rawbin, dedup)
+                else:
+                    next_frame = child_frame if child_frame >= 0 else frame_num
                     rows.append((depth,
-                        f"MC-REDIRECT  -> mc_idx={child_frame}  "
-                        f"name={movie_clips[child_frame]['name']!r}"))
-                    _walk(images, movie_clips, child_frame, 0,
+                        f"MC  eid={eid:4d}  name={child_mc['name']!r:40s}  "
+                        f"frame={next_frame}  nframes={len(child_mc['frames'])}"))
+                    _walk(images, movie_clips, eid, next_frame,
                           child_matrix, depth+1, visited, rows, rawbin, dedup)
             else:
                 next_frame = child_frame if child_frame >= 0 else frame_num

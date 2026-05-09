@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python debug_anim.py --bin loubo.bin)",
+      "Bash(python test_crop.py --bin loubo.bin --atlas loubo.png --out loubo_crops)",
+      "Bash(python debug_anim.py --bin loubo.bin --log-level DEBUG)",
+      "Bash(python -c ' *)",
+      "Bash(python debug_anim.py --bin xiaojingteng.bin)",
+      "Bash(python -c \"import default_settings; print\\(dir\\(default_settings\\)\\)\")",
+      "Bash(python debug_anim.py --bin xiaojingteng.bin --no-dedup)",
+      "Bash(python debug_anim.py --bin zombie_viking.bin --scan)",
+      "Bash(python debug_anim.py --bin zombie_viking.bin --action idle --frame 0)",
+      "Bash(python debug_anim.py --bin zombie_viking.bin --dump-mc 2)",
+      "Bash(python debug_anim.py --bin zombie_viking.bin --action walk --frame 0)",
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\evilhack28\\\\Documents\\\\Github_Repo\\\\PVZ_AS_Script\\\\Lib\" -Recurse)",
+      "Bash(Select-Object FullName, Length)",
+      "Bash(Format-Table -AutoSize)",
+      "Bash(python debug_anim.py --bin pirate_cannon_imp.bin --action idle --frame 0)",
+      "Bash(python debug_anim.py --bin pirate_cannon_imp.bin --action stand --frame 0)",
+      "Bash(python debug_anim.py --bin pirate_cannon_imp.bin --dump-mc 27 --frame 0)",
+      "Bash(python debug_anim.py --bin pirate_cannon_imp.bin --dump-mc 1 --frame 0)",
+      "Bash(python debug_anim.py --bin pirate_cannon_imp.bin --dump-mc 17 --frame 0)",
+      "Bash(python debug_anim.py --bin pirate_cannon_imp.bin --dump-mc 0 --frame 0)",
+      "Bash(python debug_anim.py --bin pirate_cannon_imp.bin --dump-mc 17)",
+      "Bash(python debug_anim.py --bin pirate_cannon_imp.bin --scan --action stand)"
+    ]
+  }
+}

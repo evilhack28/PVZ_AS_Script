@@ -107,35 +107,9 @@ def main() -> None:
     log.info("Loading animation data: %s", args.bin)
     images, movie_clips, actions, is_rawbin = parse_fbin(args.bin)
 
-    # ── Rich terminal summary ─────────────────────────────────────────────────
-    # Column layout: "│ ► NNN  ACTION_NAME           FRAMES   FPS  MOVIE_CLIP │"
-    # Fixed portion: "│ ►   0  " + 20 + "  " + 6 + "  " + 4 + "  " + mc + "│"
-    # = 9 + 20 + 2 + 6 + 2 + 4 + 2 + mc_len + 1 = 46 + mc_len
-    max_mc_len   = max((len(movie_clips[a['mc_idx']]['name'])
-                        for a in actions
-                        if 0 <= a.get('mc_idx',-1) < len(movie_clips)), default=10)
-    max_mc_len   = max(max_mc_len, len("Movie Clip"))
-    row_inner    = 3 + 2 + 20 + 2 + 6 + 2 + 4 + 2 + max_mc_len  # without border │ chars
-    file_inner   = len(args.bin) + len("File   : ")
-    W            = max(row_inner, file_inner, 50) + 4   # +4 for "│  " and "  │"
-
-    def pad(s, width):
-        """Left-pad string to width, truncating with … only if truly needed."""
-        if len(s) <= width:
-            return s.ljust(width)
-        return s[:width-1] + "…"
-
-    print()
-    print("┌" + "─" * W + "┐")
-    print(f"│  {'Cocos Animation Player':^{W-2}}  │")
-    print("├" + "─" * W + "┤")
-    print(f"│  {pad('File   : ' + args.bin, W-4)}  │")
-    print(f"│  {pad('Format : ' + ('RawBin' if is_rawbin else 'FBIN'), W-4)}  │")
-    print(f"│  {pad('Images : ' + str(len(images)),   W-4)}  │")
-    print(f"│  {pad('Clips  : ' + str(len(movie_clips)), W-4)}  │")
-    print(f"│  {pad('Actions: ' + str(len(actions)),  W-4)}  │")
-    # Meta status shown inline — computed early so the box stays one pass
-    _meta_status = "none (use --meta or place animaction.txt next to .bin)"
+    # ── Terminal summary ──────────────────────────────────────────────────────
+    # Meta status (needed for the summary, computed before the meta-load block)
+    _meta_status = "none"
     if not getattr(args, 'no_meta', False):
         if getattr(args, 'meta', None):
             _meta_status = args.meta
@@ -144,25 +118,23 @@ def main() -> None:
             _script_dir_p = os.path.dirname(os.path.abspath(__file__))
             for _d in dict.fromkeys([_bin_dir_p, os.getcwd(), _script_dir_p]):
                 if os.path.isfile(os.path.join(_d, "animaction.txt")):
-                    _meta_status = f"animaction.txt (auto, from {_d})"
+                    _meta_status = f"animaction.txt ({_d})"
                     break
-    print(f"│  {pad('Meta   : ' + _meta_status, W-4)}  │")
+
+    fmt_tag = "RawBin" if is_rawbin else "FBIN"
+    print()
+    print(f"Code_Name  : {bin_stem}")
+    print(f"Format     : {fmt_tag}  |  Images: {len(images)}  Clips: {len(movie_clips)}  Actions: {len(actions)}")
+    print(f"Meta       : {_meta_status}")
+
     if actions:
-        print("├" + "─" * W + "┤")
-        hdr = f"  {'#':>3}  {'Action':<20}  {'Frames':>6}  {'FPS':>4}  {'Movie Clip':<{max_mc_len}}"
-        sep = f"  {'─'*3}  {'─'*20}  {'─'*6}  {'─'*4}  {'─'*max_mc_len}"
-        print(f"│{hdr}  │")
-        print(f"│{sep}  │")
-        for i, act in enumerate(actions):
-            midx  = act.get('mc_idx', -1)
-            mc    = movie_clips[midx] if 0 <= midx < len(movie_clips) else None
-            nf    = len(mc['frames']) if mc else 0
-            fps   = mc.get('frame_rate', 0) if mc else 0
-            mcn   = pad(mc['name'] if mc else '?', max_mc_len)
-            aname = pad(act.get('name', '?'), 20)
-            mark  = "►" if i == 0 else " "
-            print(f"│ {mark} {i:>3}  {aname}  {nf:>6}  {fps:>4}  {mcn}  │")
-    print("└" + "─" * W + "┘")
+        print()
+        for act in actions:
+            midx = act.get('mc_idx', -1)
+            mc   = movie_clips[midx] if 0 <= midx < len(movie_clips) else None
+            mcn  = mc['name'] if mc else '?'
+            print(f"  Action : {act.get('name', '?'):<20s}  →  Movie_Clip : {mcn}")
+
     print()
 
     # ── Load optional metadata ────────────────────────────────────────────────
@@ -241,20 +213,9 @@ def main() -> None:
     if args.pvr and _pvr_info is not None:
         p      = _pvr_info
         status = "OK" if texture is not None else "FAILED"
-        tex_lines = [
-            "File      : " + (args.pvr if len(args.pvr) <= W - 15 else "…" + args.pvr[-(W-16):]),
-            "Container : " + p['container'],
-            "Resolution: {}x{}".format(p['width'], p['height']),
-            "Format    : {}  ({}bpp)".format(p['format_name'], p['bpp']),
-            "Data size : {:,} bytes  (file {:,} bytes)".format(p['data_len'], p['file_size']),
-            "Status    : " + status,
-        ]
-        print("┌" + "─" * W + "┐")
-        print("│  {0:^{1}}  │".format("Texture", W - 2))
-        print("├" + "─" * W + "┤")
-        for line in tex_lines:
-            print("│  {}  │".format(pad(line, W - 4)))
-        print("└" + "─" * W + "┘")
+        print(f"Texture   : {args.pvr}")
+        print(f"           {p['container']}  {p['width']}x{p['height']}  "
+              f"{p['format_name']} ({p['bpp']}bpp)  {status}")
         print()
 
     if not images or not movie_clips or texture is None:

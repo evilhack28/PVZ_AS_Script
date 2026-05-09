@@ -517,7 +517,7 @@ class Player:
         # ── Bottom key hints ──────────────────────────────────────────────────
         hints = ("</>action  SPACE pause  N/B step  F jump  UP/DN speed  L loop  "
                  "R fps-mode  1=src 2=meta 3=custom 4=set-fps  M reload-meta  "
-                 "I list  G gif  A allgifs  S sprites  T atlas  X xfl  J dump-json  H hud")
+                 "I list  G gif  A allgifs  Z allgifs(nobg)  S sprites  T atlas  X xfl  J json  H hud")
         hsurf = self.font.render(hints, True, (150, 150, 150))
         hbg   = pygame.Surface((hsurf.get_width() + 16, hsurf.get_height() + 8),
                                 pygame.SRCALPHA)
@@ -776,6 +776,8 @@ class Player:
             self._export_gif_now()
         elif key == pygame.K_a:
             self._export_all_gifs()
+        elif key == pygame.K_z:
+            self._export_all_gifs_nobg()
         elif key == pygame.K_s:
             self._export_sprites_now()
         elif key == pygame.K_t:
@@ -817,7 +819,7 @@ class Player:
 
         out_dir  = self.cfg.pvr_name
         os.makedirs(out_dir, exist_ok=True)
-        out_name = os.path.join(out_dir, f"{action['name']}.gif")
+        out_name = os.path.join(out_dir, f"{self.cfg.pvr_name}_{action['name']}.gif")
         try:
             self._save_gif_fast(frames_to_save, out_name, dur_ms)
             msg = f"Saved {out_name}  ({len(frames_to_save)} frames)"
@@ -872,7 +874,7 @@ class Player:
             if not frames_to_save:
                 continue
 
-            out_name = os.path.join(out_dir, f"{act['name']}.gif")
+            out_name = os.path.join(out_dir, f"{self.cfg.pvr_name}_{act['name']}.gif")
             try:
                 self._save_gif_fast(frames_to_save, out_name, dur_ms)
                 print(f"  [{idx + 1}/{total}] Saved {out_name}  ({len(frames_to_save)} frames)")
@@ -885,10 +887,69 @@ class Player:
         print(msg); log.info(msg)
         self._gif_msg = msg;  self._gif_msg_ttl = 300
 
+    def _export_all_gifs_nobg(self) -> None:
+        if PilImage is None:
+            print("GIF export requires Pillow:  pip install Pillow")
+            return
+
+        total = len(self.playlist);  saved = 0;  failed = 0
+        out_dir = self.cfg.pvr_name
+        os.makedirs(out_dir, exist_ok=True)
+        print(f"\nExporting all {total} actions as transparent GIFs → {out_dir}/…")
+        self._gif_msg = f"Exporting all {total} actions (no bg)…";  self._gif_msg_ttl = 999999
+
+        action = self.playlist[self.current_idx]
+        mc_idx = action['mc_idx']
+        if 0 <= mc_idx < len(self.movie_clips):
+            mc         = self.movie_clips[mc_idx]
+            last_frame = max(0, len(mc['frames']) - 1)
+            a_start, _ = self._clamp_action_range(action, last_frame)
+            fb = BoundingBox()
+            self._render(mc_idx, a_start, fb, a_start, last_frame,
+                         self._meta_for_action(action))
+
+        for idx, act in enumerate(self.playlist):
+            mc_idx = act['mc_idx']
+            if not (0 <= mc_idx < len(self.movie_clips)):
+                continue
+
+            mc         = self.movie_clips[mc_idx]
+            last_frame = max(0, len(mc['frames']) - 1)
+            a_start, a_end = self._clamp_action_range(act, last_frame)
+            n_frames   = a_end - a_start + 1
+            meta_cfg   = self._meta_for_action(act)
+
+            frame_rate = self._resolve_fps(act, mc)
+            dur_ms     = max(1, int(1000 / frame_rate))
+
+            self._gif_msg = f"Exporting {idx + 1}/{total}:  {act['name']}  ({n_frames} frames)"
+            self._gif_msg_ttl = 999999
+            fb = BoundingBox()
+            self._render(mc_idx, a_start, fb, a_start, a_end, meta_cfg)
+            pygame.event.pump()
+
+            frames_to_save = self._render_gif_frames(mc_idx, a_start, a_end, meta_cfg,
+                                                     transparent=True)
+            if not frames_to_save:
+                continue
+
+            out_name = os.path.join(out_dir, f"{self.cfg.pvr_name}_{act['name']}_nobg.gif")
+            try:
+                self._save_gif_fast(frames_to_save, out_name, dur_ms)
+                print(f"  [{idx + 1}/{total}] Saved {out_name}  ({len(frames_to_save)} frames)")
+                saved += 1
+            except Exception as exc:
+                print(f"  [{idx + 1}/{total}] FAILED {out_name}: {exc}")
+                failed += 1
+
+        msg = f"Done — {saved} transparent GIFs saved" + (f", {failed} failed" if failed else "")
+        print(msg); log.info(msg)
+        self._gif_msg = msg;  self._gif_msg_ttl = 300
+
     # ── Shared GIF frame renderer ─────────────────────────────────────────────
 
     def _render_gif_frames(self, mc_idx: int, a_start: int, a_end: int,
-                           meta_cfg=None) -> list:
+                           meta_cfg=None, transparent: bool = False) -> list:
         # ── Pass 1: dry-run to find the union bounding box ────────────────────
         # Render every frame on a large probe surface (bounds-tracking only) so
         # we know the tight crop region before allocating the real canvas.
@@ -933,14 +994,23 @@ class Player:
         pa, pb, pc, pd, ptx, pty = base
         small_base = (pa, pb, pc, pd, ptx - bx0, pty - by0)
 
-        canvas = pygame.Surface((crop_w, crop_h))
+        if transparent:
+            canvas = pygame.Surface((crop_w, crop_h), pygame.SRCALPHA)
+        else:
+            canvas = pygame.Surface((crop_w, crop_h))
         frames: list = []
 
         for f in range(a_start, a_end + 1):
-            canvas.fill(self.cfg.background_rgb)
-            self.renderer.draw(canvas, mc_idx, f, small_base)
-            raw = pygame.image.tostring(canvas, "RGB")
-            frames.append(PilImage.frombytes("RGB", (crop_w, crop_h), raw))
+            if transparent:
+                canvas.fill((0, 0, 0, 0))
+                self.renderer.draw(canvas, mc_idx, f, small_base)
+                raw = pygame.image.tostring(canvas, "RGBA")
+                frames.append(PilImage.frombytes("RGBA", (crop_w, crop_h), raw))
+            else:
+                canvas.fill(self.cfg.background_rgb)
+                self.renderer.draw(canvas, mc_idx, f, small_base)
+                raw = pygame.image.tostring(canvas, "RGB")
+                frames.append(PilImage.frombytes("RGB", (crop_w, crop_h), raw))
 
         del canvas
         return frames
@@ -1298,46 +1368,75 @@ class Player:
     @staticmethod
     def _save_gif_fast(frames: list, path: str, duration_ms: int) -> None:
         """
-        Save a GIF using a single global palette shared across all frames.
+        Save an animated GIF with a shared global palette (one quantise pass).
 
-        Per-frame quantisation (default PIL behaviour) is O(W×H×256) per frame
-        and causes two problems: it is very slow for long animations, and the
-        palette changes every frame producing colour flickering.
-
-        This helper builds one palette from up to 16 evenly-spaced sample
-        frames then applies it to every frame with fast nearest-colour mapping.
-        Typical speedup: 10–50× vs the default PIL save path.
+        RGBA frames produce a transparent GIF (index 255 = transparent).
+        RGB  frames produce an opaque GIF (original behaviour).
+        Typical speedup vs per-frame quantise: 10–50×.
         """
         if not frames:
             return
 
-        # Build a representative sample (at most 16 frames, evenly spaced).
-        n       = len(frames)
-        step    = max(1, n // 16)
-        samples = frames[::step][:16]
+        has_alpha = (frames[0].mode == "RGBA")
+        n         = len(frames)
+        step      = max(1, n // 16)
+        samples   = frames[::step][:16]
+        w, h      = frames[0].size
 
-        # Combine samples into one wide image for a single quantisation pass.
-        w, h     = frames[0].size
-        combined = PilImage.new("RGB", (w * len(samples), h))
-        for i, s in enumerate(samples):
-            combined.paste(s, (i * w, 0))
+        if has_alpha:
+            # Build palette from sample frames composited onto white,
+            # so transparent areas don't distort colour selection.
+            combined = PilImage.new("RGB", (w * len(samples), h), (255, 255, 255))
+            for i, s in enumerate(samples):
+                bg = PilImage.new("RGB", (w, h), (255, 255, 255))
+                bg.paste(s.convert("RGB"), mask=s.getchannel("A"))
+                combined.paste(bg, (i * w, 0))
 
-        # Quantise → extract palette (256 colours, no dither for speed).
-        quantised = combined.quantize(colors=256, dither=0)
-        palette   = quantised.getpalette()
+            # 255 colours — palette index 255 reserved for transparency.
+            quantised = combined.quantize(colors=255, dither=0)
+            palette   = list(quantised.getpalette())
 
-        # Build a palette-mode template we can reuse for every frame.
-        pal_img = PilImage.new("P", (1, 1))
-        pal_img.putpalette(palette)
+            pal_img = PilImage.new("P", (1, 1))
+            pal_img.putpalette(palette)
 
-        # Convert every frame using the global palette (no per-frame quantise).
-        pal_frames = [f.quantize(palette=pal_img, dither=0) for f in frames]
+            TRANS = 255
+            pal_frames = []
+            for f in frames:
+                alpha = f.getchannel("A")
+                bg    = PilImage.new("RGB", (w, h), (255, 255, 255))
+                bg.paste(f.convert("RGB"), mask=alpha)
+                p = bg.quantize(palette=pal_img, dither=0)
+                # Force fully-transparent pixels to index TRANS.
+                p_bytes = bytearray(p.tobytes())
+                a_bytes = alpha.tobytes()
+                for k in range(len(p_bytes)):
+                    if a_bytes[k] < 128:
+                        p_bytes[k] = TRANS
+                result = PilImage.frombytes("P", (w, h), bytes(p_bytes))
+                result.putpalette(palette)
+                pal_frames.append(result)
 
-        pal_frames[0].save(
-            path, save_all=True,
-            append_images=pal_frames[1:],
-            duration=duration_ms, loop=0, optimize=False,
-        )
+            pal_frames[0].save(
+                path, save_all=True,
+                append_images=pal_frames[1:],
+                duration=duration_ms, loop=0, optimize=False,
+                transparency=TRANS, disposal=2,
+            )
+        else:
+            # Original opaque path.
+            combined = PilImage.new("RGB", (w * len(samples), h))
+            for i, s in enumerate(samples):
+                combined.paste(s, (i * w, 0))
+            quantised  = combined.quantize(colors=256, dither=0)
+            palette    = quantised.getpalette()
+            pal_img    = PilImage.new("P", (1, 1))
+            pal_img.putpalette(palette)
+            pal_frames = [f.quantize(palette=pal_img, dither=0) for f in frames]
+            pal_frames[0].save(
+                path, save_all=True,
+                append_images=pal_frames[1:],
+                duration=duration_ms, loop=0, optimize=False,
+            )
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 

@@ -150,7 +150,7 @@ def _read_images(buf: InputBuffer) -> list:
         w      = buf.read_float_min(100.0)   # [2] width
         h      = buf.read_float_min(100.0)   # [3] height
         tex_x  = buf.read_float_min(100.0)   # [4] atlas X
-        tex_y  = buf.read_float_min(100.0)   # [5] atlas Y (tag=4 near-zero = 0)
+        tex_y  = buf.read_float_min(100.0)   # [5] atlas Y
         _hx    = buf.read_float_min(100.0)   # [6] hint: tex_x+w+pad (ignored)
         _hy    = buf.read_float_min(100.0)   # [7] hint: h+pad       (ignored)
 

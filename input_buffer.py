@@ -107,7 +107,7 @@ class InputBuffer:
         elif tag == 3:
             return float(self.read_int()) / divisor
         elif tag == 4:
-            return struct.unpack('<f', self.read_bytes(4))[0]
+            return float(self.read_int()) / divisor
         else:
             log.warning("Unknown FloatMin tag %d at offset %d – defaulting to 0.0",
                         tag, self.offset - 1)

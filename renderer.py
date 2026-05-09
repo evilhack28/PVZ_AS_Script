@@ -168,27 +168,29 @@ class Renderer:
 
         # ── FBIN image display-list deduplication ─────────────────────────────
         # In FBIN, Flash sometimes exports stale keyframe placements: the same
-        # image element (is_mc=False) appears multiple times with the same id
-        # at different positions — earlier ones are old keyframe states that
-        # were never cleared. Only the LAST placement per image id is correct.
-        # MC elements are intentionally multi-instance (e.g. same child MC
-        # at different depths) so we only dedup image elements.
-        # Guard: only apply when there are actual image-id duplicates.
+        # image element (is_mc=False) appears exactly TWICE per frame — the
+        # earlier one is the old keyframe state, the later one is correct.
+        # Only dedup when count == 2 (last wins). Three or more copies of the
+        # same image id are intentional multi-instance placement (e.g. repeated
+        # vine thorns/nodes) and must all be rendered.
         else:
-            # Single-pass: collect last index for each image id.
-            # Only rebuild elements list if duplicates actually exist.
-            seen_img: dict = {}
-            has_dup = False
-            for i, elem in enumerate(elements):
+            img_id_counts: dict = {}
+            for elem in elements:
                 if not elem['is_mc']:
                     eid = elem['id']
-                    if eid in seen_img:
-                        has_dup = True
-                    seen_img[eid] = i  # last index wins
-            if has_dup:
-                kept_img = set(seen_img.values())
-                elements = [elem for i, elem in enumerate(elements)
-                            if elem['is_mc'] or i in kept_img]
+                    img_id_counts[eid] = img_id_counts.get(eid, 0) + 1
+            dedup_ids = {eid for eid, cnt in img_id_counts.items() if cnt == 2}
+            if dedup_ids:
+                last_pos: dict = {}
+                for i, elem in enumerate(elements):
+                    if not elem['is_mc'] and elem['id'] in dedup_ids:
+                        last_pos[elem['id']] = i
+                elements = [
+                    elem for i, elem in enumerate(elements)
+                    if elem['is_mc']
+                    or elem['id'] not in dedup_ids
+                    or i == last_pos[elem['id']]
+                ]
 
         for elem in elements:
             eid = elem['id']
@@ -209,13 +211,30 @@ class Renderer:
                     continue
                 child_mc = self.movie_clips[eid]
 
-                if self.rawbin and len(child_mc['frames']) == 1 and child_frame >= 0:
-                    if child_frame < len(self.images):
+                if self.rawbin:
+                    if eid == 1 and child_frame >= 0:
+                        # mc_id=1 is universally the body-part redirect MC.
+                        # frame_index is the target MC index, not an image index.
+                        if child_frame < len(self.movie_clips):
+                            self.draw(surface, child_frame, frame_num,
+                                      (na, nb, nc, nd, ntx, nty),
+                                      bounds, _depth + 1, _visited)
+                        elif child_frame < len(self.images):
+                            self._draw_image(surface, child_frame, elem,
+                                             (na, nb, nc, nd, ntx, nty), bounds)
+                    elif child_frame >= 0 and child_frame < len(self.images):
+                        # mc_id≠1 (eid=0 ground, eid=2 image-pointer, etc.):
+                        # frame_index is a direct image index.
                         self._draw_image(surface, child_frame, elem,
                                          (na, nb, nc, nd, ntx, nty), bounds)
-                    elif child_frame < len(self.movie_clips):
-                        # Pass frame_num so the target MC animates in sync.
-                        self.draw(surface, child_frame, frame_num,
+                    elif len(child_mc['frames']) == 1 and child_frame >= 0:
+                        if child_frame < len(self.movie_clips):
+                            self.draw(surface, child_frame, frame_num,
+                                      (na, nb, nc, nd, ntx, nty),
+                                      bounds, _depth + 1, _visited)
+                    else:
+                        next_frame = child_frame if child_frame >= 0 else frame_num
+                        self.draw(surface, eid, next_frame,
                                   (na, nb, nc, nd, ntx, nty),
                                   bounds, _depth + 1, _visited)
                 else:

@@ -15,7 +15,8 @@ from xfl_helpers import sym_root, make_single_layer, write_xml
 log = logging.getLogger(__name__)
 
 
-def export_image_symbols(images: list, sprite_info: dict, image_dir: str) -> None:
+def export_image_symbols(images: list, sprite_info: dict, image_dir: str,
+                          img_scale: float = 1.0) -> None:
     """Write library/image/<name>.xml for every valid image."""
     count = 0
     for idx in range(len(images)):
@@ -40,10 +41,10 @@ def export_image_symbols(images: list, sprite_info: dict, image_dir: str) -> Non
 
         mx = ET.SubElement(bm, "matrix")
         m  = ET.SubElement(mx, "Matrix")
-        m.set("a",  "1.000000")
+        m.set("a",  f"{img_scale:.6f}")
         m.set("b",  "0.000000")
         m.set("c",  "0.000000")
-        m.set("d",  "1.000000")
+        m.set("d",  f"{img_scale:.6f}")
         m.set("tx", f"{-w / 2:.6f}")
         m.set("ty", f"{-h / 2:.6f}")
 

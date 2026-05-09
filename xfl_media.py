@@ -51,7 +51,7 @@ def _build_image_name_map(images: list, movie_clips: list) -> dict:
 
 
 def export_media(images: list, atlas, stem: str, media_dir: str,
-                 movie_clips: list = None) -> dict:
+                 movie_clips: list = None, upscale: float = 1.0) -> dict:
     """
     Crop each image out of *atlas* and save to *media_dir*.
 
@@ -111,7 +111,13 @@ def export_media(images: list, atlas, stem: str, media_dir: str,
         # ── crop & save ───────────────────────────────────────────────────────
         png_path = os.path.join(media_dir, base + ".png")
         if not os.path.exists(png_path):
-            atlas.crop((tx, ty, tx + w, ty + h)).save(png_path, "PNG")
+            cropped = atlas.crop((tx, ty, tx + w, ty + h))
+            if upscale != 1.0:
+                from PIL import Image as _PilImage
+                new_w = round(w * upscale)
+                new_h = round(h * upscale)
+                cropped = cropped.resize((new_w, new_h), _PilImage.LANCZOS)
+            cropped.save(png_path, "PNG")
             log.debug("Saved media/%s.png", base)
 
         result[idx] = base

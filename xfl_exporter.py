@@ -50,6 +50,7 @@ def export_xfl(
     anim_meta         = None,
     define_key:  str  = "",
     scale:       float = 1.0,
+    resolution:  int  = 1536,
 ) -> str:
     """Export the animation and return the path to the .xfl project folder."""
     if not os.path.isfile(texture_png):
@@ -78,8 +79,13 @@ def export_xfl(
     with open(os.path.join(xfl_dir, "main.xfl"), "w") as fh:
         fh.write("PROXY-CS5")
 
-    sprite_info = export_media(images, atlas, stem, media_dir, movie_clips)
-    export_image_symbols(images, sprite_info, image_dir)
+    # 1536: sprites are upscaled ×1.28 and image XML scale set to 0.78125
+    # 1200: native sprite sizes and scale 1.0
+    img_scale = 0.781250 if resolution == 1536 else 1.0
+    upscale   = (1.0 / img_scale) if resolution == 1536 else 1.0
+
+    sprite_info = export_media(images, atlas, stem, media_dir, movie_clips, upscale=upscale)
+    export_image_symbols(images, sprite_info, image_dir, img_scale=img_scale)
     export_sprite_symbols(images, movie_clips, sprite_info, sprite_dir, scale=scale)
     export_label_symbols(movie_clips, actions, images, sprite_info, label_dir,
                          anim_meta=anim_meta, define_key=define_key, scale=scale)
@@ -90,15 +96,15 @@ def export_xfl(
         stem, fps, atlas_w, atlas_h, xfl_dir,
     )
 
-    _write_data_json(images, sprite_info, xfl_dir)
+    _write_data_json(images, sprite_info, xfl_dir, resolution=resolution)
 
-    _write_resource_bundle(stem, pkg_dir)
+    _write_resource_bundle(stem, pkg_dir, resolution=resolution)
 
     log.info("XFL → %s", xfl_dir)
     return xfl_dir
 
 
-def _write_data_json(images: list, sprite_info: dict, xfl_dir: str) -> None:
+def _write_data_json(images: list, sprite_info: dict, xfl_dir: str, resolution: int = 1536) -> None:
     """
     Write data.json into the XFL root folder.
 
@@ -132,7 +138,7 @@ def _write_data_json(images: list, sprite_info: dict, xfl_dir: str) -> None:
 
     data = {
         "version":    6,
-        "resolution": 1536,
+        "resolution": resolution,
         "position":   {"x": 0, "y": 0},
         "image":      image,
         "sprite":     {},
@@ -147,7 +153,7 @@ def _write_data_json(images: list, sprite_info: dict, xfl_dir: str) -> None:
 
 
 
-def _write_resource_bundle(stem: str, pkg_dir: str) -> None:
+def _write_resource_bundle(stem: str, pkg_dir: str, resolution: int = 1536) -> None:
     """
     Create the resource bundle folder and its data.json alongside the XFL.
 
@@ -197,21 +203,32 @@ def _write_resource_bundle(stem: str, pkg_dir: str) -> None:
     os.makedirs(pkg_dir, exist_ok=True)
     bundle_dir = pkg_dir
 
+    if resolution == 1536:
+        tex_fmt_cat = 0
+        res_arr     = [1536, 768]
+        fmt         = 147
+        compression = 3
+    else:
+        tex_fmt_cat = 1
+        res_arr     = [1200, 600]
+        fmt         = 147
+        compression = 1
+
     data = {
         "#expand_method": "advanced",
         "version": 4,
-        "texture_format_category": 1,
+        "texture_format_category": tex_fmt_cat,
         "composite": True,
         "category": {
-            "resolution": [1536, 768],
-            "format": 147,
+            "resolution": res_arr,
+            "format": fmt,
         },
         "subgroup": {
             pascal_name: {
                 "category": {
                     "common_type": True,
                     "locale": None,
-                    "compression": 3,
+                    "compression": compression,
                 },
                 "resource": {
                     popanim_key: {
@@ -239,8 +256,9 @@ if __name__ == "__main__":
     p.add_argument("--atlas", required=True)
     p.add_argument("scale", nargs="?", default=None,
                    help="Scale factor: 1.28 (bigger) or 0.78 (smaller)")
-    p.add_argument("--out",   default=None)
-    p.add_argument("--stem",  default=None)
+    p.add_argument("--out",        default=None)
+    p.add_argument("--stem",       default=None)
+    p.add_argument("--resolution", default=1536, type=int, choices=[1200, 1536])
     args = p.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -274,6 +292,6 @@ if __name__ == "__main__":
     xfl_path = export_xfl(
         images=images, movie_clips=movie_clips, actions=actions,
         texture_png=atlas_path, out_dir=out_dir, stem=stem, fps=fps,
-        rawbin=rawbin, scale=scale,
+        rawbin=rawbin, scale=scale, resolution=args.resolution,
     )
     print(f"\nDone!\n  XFL folder : {xfl_path}\n  .fla file  : {os.path.join(out_dir, stem + '.fla')}")
