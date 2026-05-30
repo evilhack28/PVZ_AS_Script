@@ -230,10 +230,25 @@ def _collect_draws(mc_idx, frame_num, parent_mat, movie_clips, images,
                 continue
             child_mc = movie_clips[eid]
 
-            if rawbin and len(child_mc["frames"]) == 1 and child_frame >= 0:
-                if child_frame < len(images):
+            if rawbin:
+                if eid == 1 and child_frame >= 0:
+                    if child_frame < len(movie_clips):
+                        results.extend(_collect_draws(child_frame, frame_num, world,
+                                                      movie_clips, images, rawbin,
+                                                      depth+1, visited))
+                    elif child_frame < len(images):
+                        img = images[child_frame]
+                        if not (int(img.get("tex_x",0))==0 and int(img.get("tex_y",0))==0
+                                and int(img.get("width",0))<=4 and int(img.get("height",0))<=4):
+                            results.append({
+                                "img_idx":      child_frame,
+                                "img":          img,
+                                "world_matrix": world,
+                                "local_matrix": elem["matrix"],
+                                "alpha":        float(elem.get("alpha", 1.0)),
+                            })
+                elif child_frame >= 0 and child_frame < len(images):
                     img = images[child_frame]
-                    # Skip tiny placeholder at origin
                     if not (int(img.get("tex_x",0))==0 and int(img.get("tex_y",0))==0
                             and int(img.get("width",0))<=4 and int(img.get("height",0))<=4):
                         results.append({
@@ -243,8 +258,14 @@ def _collect_draws(mc_idx, frame_num, parent_mat, movie_clips, images,
                             "local_matrix": elem["matrix"],
                             "alpha":        float(elem.get("alpha", 1.0)),
                         })
-                elif child_frame < len(movie_clips):
-                    results.extend(_collect_draws(child_frame, frame_num, world,
+                elif len(child_mc["frames"]) == 1 and child_frame >= 0:
+                    if child_frame < len(movie_clips):
+                        results.extend(_collect_draws(child_frame, frame_num, world,
+                                                      movie_clips, images, rawbin,
+                                                      depth+1, visited))
+                else:
+                    nf = child_frame if child_frame >= 0 else frame_num
+                    results.extend(_collect_draws(eid, nf, world,
                                                   movie_clips, images, rawbin,
                                                   depth+1, visited))
             else:
@@ -471,8 +492,25 @@ def _collect_draws_from_frame(frame_elems, movie_clips, images, rawbin,
             child_mc = movie_clips[eid]
             child_frames = child_mc.get("frames", [])
 
-            if rawbin and len(child_frames) == 1 and child_frame >= 0:
-                if child_frame < len(images):
+            if rawbin:
+                if eid == 1 and child_frame >= 0:
+                    if child_frame < len(movie_clips):
+                        if child_frame not in visited:
+                            child_f_idx = frame_num % max(1, len(movie_clips[child_frame].get("frames",[[]])))
+                            child_elems = movie_clips[child_frame]["frames"][child_f_idx] \
+                                          if movie_clips[child_frame].get("frames") else []
+                            results.extend(_collect_draws_from_frame(
+                                child_elems, movie_clips, images, rawbin, world,
+                                frame_num, depth+1, visited | {child_frame}))
+                    elif child_frame < len(images):
+                        img = images[child_frame]
+                        if not _is_placeholder(img):
+                            results.append({"img_idx": child_frame, "img": img,
+                                            "world_matrix": world,
+                                            "local_matrix": elem["matrix"],
+                                            "mc_id": eid,
+                                            "alpha": float(elem.get("alpha", 1.0))})
+                elif child_frame >= 0 and child_frame < len(images):
                     img = images[child_frame]
                     if not _is_placeholder(img):
                         results.append({"img_idx": child_frame, "img": img,
@@ -480,14 +518,23 @@ def _collect_draws_from_frame(frame_elems, movie_clips, images, rawbin,
                                         "local_matrix": elem["matrix"],
                                         "mc_id": eid,
                                         "alpha": float(elem.get("alpha", 1.0))})
-                elif child_frame < len(movie_clips):
-                    if child_frame not in visited:
-                        child_f_idx = frame_num % max(1, len(movie_clips[child_frame].get("frames",[[]])))
-                        child_elems = movie_clips[child_frame]["frames"][child_f_idx] \
-                                      if movie_clips[child_frame].get("frames") else []
+                elif len(child_frames) == 1 and child_frame >= 0:
+                    if child_frame < len(movie_clips):
+                        if child_frame not in visited:
+                            child_f_idx = frame_num % max(1, len(movie_clips[child_frame].get("frames",[[]])))
+                            child_elems = movie_clips[child_frame]["frames"][child_f_idx] \
+                                          if movie_clips[child_frame].get("frames") else []
+                            results.extend(_collect_draws_from_frame(
+                                child_elems, movie_clips, images, rawbin, world,
+                                frame_num, depth+1, visited | {child_frame}))
+                else:
+                    nf = child_frame if child_frame >= 0 else frame_num
+                    child_fi = nf % max(1, len(child_frames)) if child_frames else 0
+                    child_elems = child_frames[child_fi] if child_frames else []
+                    if eid not in visited:
                         results.extend(_collect_draws_from_frame(
                             child_elems, movie_clips, images, rawbin, world,
-                            frame_num, depth+1, visited | {child_frame}))
+                            frame_num, depth+1, visited | {eid}))
             else:
                 nf = child_frame if child_frame >= 0 else frame_num
                 child_fi = nf % max(1, len(child_frames)) if child_frames else 0

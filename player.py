@@ -1175,7 +1175,10 @@ class Player:
             if rawbin:
                 seen = {}
                 for i, elem in enumerate(elements):
-                    seen[elem.get('frame_index', -1)] = i
+                    tx_r = round(elem['matrix'][4], 1)
+                    ty_r = round(elem['matrix'][5], 1)
+                    key  = (elem.get('frame_index', -1), tx_r, ty_r)
+                    seen[key] = i
                 elements = [elements[i] for i in sorted(seen.values())]
             else:
                 from collections import Counter
@@ -1208,9 +1211,23 @@ class Player:
                     if eid >= len(self.movie_clips): continue
                     child_mc = self.movie_clips[eid]
 
-                    if rawbin and len(child_mc['frames']) == 1 and child_frame >= 0:
-                        if child_frame < len(self.images):
-                            # leaf image via rawbin redirect
+                    if rawbin:
+                        if eid == 1 and child_frame >= 0:
+                            if child_frame < len(self.movie_clips):
+                                results.extend(_collect(child_frame, frame_num,
+                                                        world, depth+1, visited))
+                            elif child_frame < len(self.images):
+                                img = self.images[child_frame]
+                                if not (int(img['tex_x'])==0 and int(img['tex_y'])==0
+                                        and int(img['width'])<=4 and int(img['height'])<=4):
+                                    results.append({
+                                        "img_idx":     child_frame,
+                                        "img_name":    img.get("name",""),
+                                        "world_matrix": list(world),
+                                        "local_matrix": list(elem['matrix']),
+                                        "alpha":       float(elem.get("alpha", 1.0)),
+                                    })
+                        elif child_frame >= 0 and child_frame < len(self.images):
                             img = self.images[child_frame]
                             if not (int(img['tex_x'])==0 and int(img['tex_y'])==0
                                     and int(img['width'])<=4 and int(img['height'])<=4):
@@ -1221,9 +1238,13 @@ class Player:
                                     "local_matrix": list(elem['matrix']),
                                     "alpha":       float(elem.get("alpha", 1.0)),
                                 })
-                        elif child_frame < len(self.movie_clips):
-                            results.extend(_collect(child_frame, frame_num,
-                                                    world, depth+1, visited))
+                        elif len(child_mc['frames']) == 1 and child_frame >= 0:
+                            if child_frame < len(self.movie_clips):
+                                results.extend(_collect(child_frame, frame_num,
+                                                        world, depth+1, visited))
+                        else:
+                            nf = child_frame if child_frame >= 0 else frame_num
+                            results.extend(_collect(eid, nf, world, depth+1, visited))
                     else:
                         nf = child_frame if child_frame >= 0 else frame_num
                         results.extend(_collect(eid, nf, world, depth+1, visited))

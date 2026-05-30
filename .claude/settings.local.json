@@ -22,7 +22,20 @@
       "Bash(python debug_anim.py --bin pirate_cannon_imp.bin --dump-mc 17 --frame 0)",
       "Bash(python debug_anim.py --bin pirate_cannon_imp.bin --dump-mc 0 --frame 0)",
       "Bash(python debug_anim.py --bin pirate_cannon_imp.bin --dump-mc 17)",
-      "Bash(python debug_anim.py --bin pirate_cannon_imp.bin --scan --action stand)"
+      "Bash(python debug_anim.py --bin pirate_cannon_imp.bin --scan --action stand)",
+      "Bash(python debug_anim.py --bin zombie_viking.bin --dump-mc 25)",
+      "Bash(python debug_anim.py --bin zombie_viking.bin --dump-mc 6)",
+      "Bash(python debug_anim.py --bin zombie_viking.bin --dump-mc 1)",
+      "Bash(python debug_anim.py --bin zombie_viking.bin --dump-mc 15)",
+      "Bash(python debug_anim.py --bin zombie_viking.bin --dump-mc 16)",
+      "Bash(python round_trip_test.py zombie_viking.bin)",
+      "Bash(python debug_anim.py --bin zombie_viking.bin --action idle --frame 31)",
+      "Bash(python debug_anim.py --bin zombie_viking.bin --frame 0)",
+      "Bash(git stash *)",
+      "Bash(python *)",
+      "Bash(taskkill /F /IM python.exe)",
+      "Bash(del render_idle_f*.png zombie_viking_atlas.png)",
+      "Bash(rmdir /S /Q crops_viking)"
     ]
   }
 }
