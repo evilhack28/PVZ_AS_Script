@@ -13,8 +13,8 @@ Changes from v2
 
 import math
 import logging
-from collections import Counter, OrderedDict
-from dataclasses import dataclass, field
+from collections import OrderedDict
+from dataclasses import dataclass
 from typing import Optional
 
 import pygame
@@ -23,6 +23,10 @@ log = logging.getLogger(__name__)
 
 # ── Constants ────────────────────────────────────────────────────────────────
 MAX_CACHE_SIZE = 2048
+
+# Sentinel so `_override_cache` can distinguish a cached `None` (image
+# matched an override whose flip_y_override is None) from "not yet cached".
+_MISSING = object()
 
 # ── Per-sprite name overrides ─────────────────────────────────────────────────
 _NAME_OVERRIDES = {
@@ -74,6 +78,9 @@ class Renderer:
         self.hidden_parts: frozenset = frozenset()
         # Populated at the start of each draw() call (top-level only)
         self._plane_imgs: set = set()
+        # Per-img_idx resolved _NAME_OVERRIDES flip_y value (None = no override).
+        # Computed lazily on first draw and reused across frames.
+        self._override_cache: dict = {}
 
     # ── Public draw call ──────────────────────────────────────────────────────
 
@@ -142,6 +149,21 @@ class Renderer:
         elif _depth == 0:
             self._plane_imgs = set()
 
+        # At top level: cache the inverse of the base transform's linear part.
+        # Both formats share the same problem: intermediate MCs can carry the
+        # actual scale/rotation while the leaf image element's matrix is identity
+        # (e.g. RawBin starburst → MC[21]; FBIN action MC → 1-frame body-part MC
+        # → leaf IMG). `_draw_image` factors this base out of the cumulative
+        # matrix so it recovers the full tree's scale/rotation, not just the leaf's.
+        if _depth == 0:
+            ba, bb, bc, bd, _, _ = transform_matrix
+            bdet = ba * bd - bc * bb
+            if abs(bdet) > 1e-12:
+                self._base_inv_lin = (bd / bdet, -bb / bdet,
+                                      -bc / bdet,  ba / bdet)
+            else:
+                self._base_inv_lin = (1.0, 0.0, 0.0, 1.0)
+
         mc = self.movie_clips[mc_idx]
         if not mc['frames']:
             return
@@ -158,13 +180,14 @@ class Renderer:
         # We only suppress a placement when (frame_index, tx, ty) is truly
         # identical — a genuine duplicate at the exact same spot.
         if self.rawbin:
-            seen: dict = {}
+            last_idx: dict = {}
             for i, elem in enumerate(elements):
-                tx_r = round(elem['matrix'][4], 1)
-                ty_r = round(elem['matrix'][5], 1)
-                key  = (elem.get('frame_index', -1), tx_r, ty_r)
-                seen[key] = i              # last wins per (fi, tx, ty)
-            elements = [elements[i] for i in sorted(seen.values())]
+                m   = elem['matrix']
+                key = (elem.get('frame_index', -1),
+                       round(m[4], 1), round(m[5], 1))
+                last_idx[key] = i          # last wins per (fi, tx, ty)
+            keep     = set(last_idx.values())
+            elements = [e for i, e in enumerate(elements) if i in keep]
 
         # ── FBIN image display-list deduplication ─────────────────────────────
         # In FBIN, Flash sometimes exports stale keyframe placements: the same
@@ -297,7 +320,21 @@ class Renderer:
         except ValueError:
             return
 
-        la, lb, lc, ld, _ltx, _lty = elem['matrix']
+        na, nb, nc, nd, ntx, nty = matrix
+
+        # Intermediate MCs often carry the actual scale/rotation while the leaf
+        # element matrix is identity (RawBin: eid=1 → MC[fi] redirect; FBIN:
+        # action MC → 1-frame body-part MC → leaf IMG). Use the cumulative
+        # matrix with the base transform factored out so the sprite reflects the
+        # full tree's transform, not just the leaf's.
+        if hasattr(self, '_base_inv_lin'):
+            iba, ibb, ibc, ibd = self._base_inv_lin
+            la = iba * na + ibc * nb
+            lb = ibb * na + ibd * nb
+            lc = iba * nc + ibc * nd
+            ld = ibb * nc + ibd * nd
+        else:
+            la, lb, lc, ld, _ltx, _lty = elem['matrix']
 
         scale_x_l = math.sqrt(la * la + lb * lb)
         if scale_x_l == 0.0:
@@ -315,24 +352,14 @@ class Renderer:
         scale_x = scale_x_l
         scale_y = scale_y_l
 
-        na, nb, nc, nd, ntx, nty = matrix
-
-        name_lower = str(img_def.get('name', '')).lower()
-        for key, overrides in _NAME_OVERRIDES.items():
-            if key not in name_lower:
-                continue
-            sg = overrides.get('size_guard')
-            if sg and (int(img_def.get('width', 0)), int(img_def.get('height', 0))) != sg:
-                continue
-            if overrides.get('flip_y_override') is not None:
-                flip_y = overrides['flip_y_override']
-            break
+        override_flip = self._resolve_override(img_idx)
+        if override_flip is not None:
+            flip_y = override_flip
 
         cache_key = (img_idx, round(scale_x, 4), round(scale_y, 4),
                      round(rotation_deg, 2), flip_y)
         xformed   = self._get_cached(sprite, cache_key, scale_x, scale_y,
-                                     rotation_deg, flip_y,
-                                     img_def['width'], img_def['height'])
+                                     rotation_deg, flip_y)
         if xformed is None:
             return
 
@@ -358,12 +385,40 @@ class Renderer:
         if bounds is not None:
             bounds.expand(r_rect)
 
+    # ── Name-override resolver (cached per img_idx) ───────────────────────────
+
+    def _resolve_override(self, img_idx: int):
+        """
+        Resolve `_NAME_OVERRIDES` once per image and cache the result.
+        Returns the flip_y value to apply, or None to leave flip_y unchanged.
+        """
+        cached = self._override_cache.get(img_idx, _MISSING)
+        if cached is not _MISSING:
+            return cached
+
+        img_def    = self.images[img_idx]
+        name_lower = str(img_def.get('name', '')).lower()
+        w_i        = int(img_def.get('width', 0))
+        h_i        = int(img_def.get('height', 0))
+
+        result = None
+        for key, overrides in _NAME_OVERRIDES.items():
+            if key not in name_lower:
+                continue
+            sg = overrides.get('size_guard')
+            if sg and (w_i, h_i) != sg:
+                continue
+            result = overrides.get('flip_y_override')
+            break
+
+        self._override_cache[img_idx] = result
+        return result
+
     # ── Transform cache ───────────────────────────────────────────────────────
 
     def _get_cached(self, sprite: pygame.Surface, key: tuple,
                     scale_x: float, scale_y: float,
-                    rotation_deg: float, flip_y: bool,
-                    orig_w: float, orig_h: float) -> Optional[pygame.Surface]:
+                    rotation_deg: float, flip_y: bool) -> Optional[pygame.Surface]:
         if key in self._cache:
             self._cache.move_to_end(key)
             return self._cache[key]

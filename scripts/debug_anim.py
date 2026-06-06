@@ -20,9 +20,14 @@ Flags
 """
 
 import argparse
+import os
 import sys
 import math
 from collections import Counter
+
+# Register library subfolders on sys.path so flat project imports resolve.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import _paths  # noqa: F401
 
 
 def _parse_args():
@@ -272,7 +277,6 @@ def _walk(images, movie_clips, mc_idx, frame_num, matrix,
 def main():
     args = _parse_args()
 
-    sys.path.insert(0, '.')
     from fbin_parser import parse_fbin
 
     images, movie_clips, actions, is_rawbin = parse_fbin(args.bin)
@@ -328,6 +332,39 @@ def main():
             for a in (actions or []):
                 print(f"  {a['name']}")
             sys.exit(1)
+
+    # ── --scan mode: per-frame image counts across the whole action ───────────
+    if args.scan:
+        for action in playlist:
+            mc_idx = action.get('mc_idx', 0)
+            if not (0 <= mc_idx < len(movie_clips)):
+                continue
+            mc      = movie_clips[mc_idx]
+            nframes = len(mc['frames'])
+            print("=" * 72)
+            print(f"SCAN: {action['name']!r}   mc_idx={mc_idx}   frames={nframes}")
+            print("-" * 72)
+            for f in range(nframes):
+                rows   = _walk(images, movie_clips, mc_idx, f, base,
+                               rawbin=is_rawbin, dedup=dedup)
+                counts: Counter = Counter()
+                for _, msg in rows:
+                    if msg.startswith("IMAGE"):
+                        try:
+                            name = msg.split("name=")[1].split("'")[1]
+                            counts[name] += 1
+                        except IndexError:
+                            pass
+                n_img  = sum(counts.values())
+                n_uniq = len(counts)
+                dups   = ", ".join(f"{n}x{name}"
+                                   for name, n in counts.most_common(3) if n > 1)
+                line   = f"  frame {f:4d}: {n_img:3d} images  ({n_uniq:2d} unique)"
+                if dups:
+                    line += f"   dups: {dups}"
+                print(line)
+            print()
+        return
 
     # ── Print draw tree ───────────────────────────────────────────────────────
     for action in playlist:

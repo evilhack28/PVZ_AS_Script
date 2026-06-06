@@ -1,9 +1,9 @@
 """
 test_crop.py
 ------------
-Standalone test: parse the FBIN, crop every sprite from the atlas PNG,
-and save them to a folder. No renderer, no pygame animation — just raw
-coordinate verification.
+Standalone test: parse a FBIN or RawBin file, crop every sprite from the
+atlas PNG (or PVR), and save them to a folder. No renderer, no pygame
+animation — just raw coordinate verification.
 
 Usage:
     python test_crop.py --bin zombie_sheep_hurt.bin --atlas zombie_sheep_hurt.png --out crops
@@ -17,73 +17,25 @@ import os
 import struct
 import sys
 
+# Register library subfolders on sys.path so flat project imports resolve.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import _paths  # noqa: F401
 
-def read_float_min(data, offset, divisor):
-    tag = data[offset]; offset += 1
-    if tag == 0:   return 0.0, offset
-    elif tag == 1:
-        v = struct.unpack_from('<b', data, offset)[0]; offset += 1
-        return v / divisor, offset
-    elif tag == 2:
-        v = struct.unpack_from('<h', data, offset)[0]; offset += 2
-        return v / divisor, offset
-    elif tag == 3:
-        v = struct.unpack_from('<i', data, offset)[0]; offset += 4
-        return float(v) / divisor, offset
-    elif tag == 4:
-        # tag=4 = raw IEEE-754 float32 — value is near-zero garbage for
-        # coordinates that are truly 0; int() of the result is still 0.
-        v = struct.unpack_from('<f', data, offset)[0]; offset += 4
-        return v, offset
-    else:
-        print(f"  WARNING: unknown MinBin tag {tag} at offset {offset-1}")
-        return 0.0, offset
+from fbin_parser import parse_fbin
 
 
 def parse_images(bin_path):
-    with open(bin_path, 'rb') as f:
-        data = f.read()
-
-    if data[0:4] != b'FBIN':
-        print("ERROR: not an FBIN file")
+    images, _mcs, _actions, is_raw = parse_fbin(bin_path)
+    if images is None:
+        print(f"ERROR: failed to parse {bin_path}")
         sys.exit(1)
-
-    offset = 4
-    _ver1 = struct.unpack_from('<i', data, offset)[0]; offset += 4
-    _ver2 = struct.unpack_from('<i', data, offset)[0]; offset += 4
-
-    # Extended header: int32 + MinBin float
-    ext_int = struct.unpack_from('<i', data, offset)[0]; offset += 4
-    _ext_f, offset = read_float_min(data, offset, 100.0)
-
-    num_images = struct.unpack_from('<h', data, offset)[0]; offset += 2
-    print(f"num_images = {num_images}")
-
-    images = []
-    for i in range(num_images):
-        slen = data[offset]; offset += 1
-        name = data[offset:offset+slen].decode('utf-8', 'replace'); offset += slen
-
-        off_x,  offset = read_float_min(data, offset, 100.0)
-        off_y,  offset = read_float_min(data, offset, 100.0)
-        w,      offset = read_float_min(data, offset, 100.0)
-        h,      offset = read_float_min(data, offset, 100.0)
-        tex_x,  offset = read_float_min(data, offset, 100.0)
-        tex_y,  offset = read_float_min(data, offset, 100.0)
-        orig_x, offset = read_float_min(data, offset, 100.0)
-        orig_y, offset = read_float_min(data, offset, 100.0)
-
-        # int() rounds near-zero floats (e.g. 5.84e-41) to 0 correctly
-        tx, ty, wi, hi = int(tex_x), int(tex_y), int(w), int(h)
-
-        images.append({
-            'name': name, 'index': i,
-            'tex_x': tx, 'tex_y': ty,
-            'width': wi, 'height': hi,
-            'offset_x': off_x, 'offset_y': off_y,
-        })
-        print(f"  [{i:2d}] {name:20s}  tex=({tx:4d},{ty:4d})  size=({wi}x{hi})")
-
+    fmt = "RawBin" if is_raw else "FBIN"
+    print(f"Format: {fmt}   num_images = {len(images)}")
+    for i, img in enumerate(images):
+        tx = int(img['tex_x']); ty = int(img['tex_y'])
+        wi = int(img['width']); hi = int(img['height'])
+        print(f"  [{i:2d}] {img.get('name', ''):20s}  "
+              f"tex=({tx:4d},{ty:4d})  size=({wi}x{hi})")
     return images
 
 
@@ -126,7 +78,7 @@ def load_atlas_pvr(path):
             out[p]=r; out[p+1]=g; out[p+2]=b; out[p+3]=a
         return Image.frombytes('RGBA', (width, height), bytes(out))
     else:
-        print(f"ERROR: unsupported PVR pixel_type 0x{pixel_type:02X} — use --atlas instead")
+        print(f"ERROR: unsupported PVR pixel_type 0x{pixel_type:02X} - use --atlas instead")
         sys.exit(1)
 
 
@@ -153,10 +105,10 @@ def main():
     os.makedirs(args.out, exist_ok=True)
     saved = skipped = 0
 
-    print(f"\nCropping sprites → {args.out}/")
+    print(f"\nCropping sprites -> {args.out}/")
     for img in images:
-        tx, ty  = img['tex_x'], img['tex_y']
-        w,  h   = img['width'], img['height']
+        tx, ty  = int(img['tex_x']), int(img['tex_y'])
+        w,  h   = int(img['width']), int(img['height'])
         name    = img['name'].replace('/', '_').replace('\\', '_')
 
         if w <= 0 or h <= 0:

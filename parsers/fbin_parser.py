@@ -62,13 +62,24 @@ def parse_fbin(bin_path: str):
         log.warning("RawBin parse failed — file unrecognised.")
         return None, None, None, False
 
-    for has_transform in (True, False):
-        for order in ('A', 'B'):
-            result = _parse_impl(data, has_transform=has_transform,
-                                 order_variant=order)
-            if result is not None:
-                images, mcs, actions = result
-                return images, mcs, actions, False
+    # Silence input_buffer warnings while probing: a rejected variant misreads
+    # bytes as MinBin tags, but the outer validator throws the result away anyway.
+    ib_log = logging.getLogger("input_buffer")
+    prev_level = ib_log.level
+    ib_log.setLevel(logging.ERROR)
+    try:
+        for num_versions in (2, 1):
+            for has_transform in (True, False):
+                for order in ('A', 'B'):
+                    result = _parse_impl(data, has_transform=has_transform,
+                                         order_variant=order,
+                                         num_versions=num_versions)
+                    if result is not None:
+                        ib_log.setLevel(prev_level)
+                        images, mcs, actions = result
+                        return images, mcs, actions, False
+    finally:
+        ib_log.setLevel(prev_level)
 
     log.warning("All FBIN variants failed — attempting minimal fallback.")
     result = _minimal_fallback(data, bin_path)
@@ -80,14 +91,15 @@ def parse_fbin(bin_path: str):
 
 # ── FBIN parse ────────────────────────────────────────────────────────────────
 
-def _parse_impl(data: bytes, *, has_transform: bool, order_variant: str):
+def _parse_impl(data: bytes, *, has_transform: bool, order_variant: str,
+                num_versions: int = 2):
     buf = InputBuffer(data)
-    tag = f"has_transform={has_transform}, order={order_variant}"
+    tag = f"has_transform={has_transform}, order={order_variant}, versions={num_versions}"
     try:
         if buf.read_bytes(4) != b'FBIN':
             return None
-        _ver1 = buf.read_int()
-        _ver2 = buf.read_int()
+        for _ in range(max(0, num_versions)):
+            buf.read_int()
 
         if has_transform:
             saved = buf.tell()
@@ -139,7 +151,7 @@ def _read_images(buf: InputBuffer) -> list:
     raw_count = buf.read_short()
     count     = max(0, min(raw_count, MAX_IMAGES))
     if raw_count != count:
-        log.warning("Image count clamped %d → %d", raw_count, count)
+        log.debug("Image count clamped %d → %d", raw_count, count)
 
     images = []
     for _ in range(count):
@@ -248,7 +260,7 @@ def _read_frame(buf: InputBuffer) -> list:
     raw_elements = buf.read_short()
     num_elements = max(0, min(raw_elements, MAX_ELEMENTS))
     if raw_elements != num_elements:
-        log.warning("Element count clamped %d → %d", raw_elements, num_elements)
+        log.debug("Element count clamped %d → %d", raw_elements, num_elements)
     return [_read_element(buf) for _ in range(num_elements)]
 
 
@@ -265,10 +277,10 @@ def _read_element(buf: InputBuffer) -> dict:
     frame_index    = -1
 
     if flag & 0x02: frame_index = buf.read_short()
-    if flag & 0x04: sx = buf.read_float_min(10000.0)
-    if flag & 0x08: kx = buf.read_float_min(10000.0)
-    if flag & 0x10: ky = buf.read_float_min(10000.0)
-    if flag & 0x20: sy = buf.read_float_min(10000.0)
+    if flag & 0x04: sx = buf.read_float_min(10000.0)   # Flash matrix a
+    if flag & 0x08: ky = buf.read_float_min(10000.0)   # Flash matrix b (was incorrectly kx)
+    if flag & 0x10: kx = buf.read_float_min(10000.0)   # Flash matrix c (was incorrectly ky)
+    if flag & 0x20: sy = buf.read_float_min(10000.0)   # Flash matrix d
     if flag & 0x40:
         x = buf.read_float_min(100.0)
         y = buf.read_float_min(100.0)
@@ -308,21 +320,34 @@ def _make_pseudo_clip(name: str, images: list) -> dict:
 # ── Minimal fallback ──────────────────────────────────────────────────────────
 
 def _minimal_fallback(data: bytes, bin_path: str):
+    ib_log = logging.getLogger("input_buffer")
+    prev_level = ib_log.level
+    ib_log.setLevel(logging.ERROR)
     try:
-        buf = InputBuffer(data)
-        buf.read_bytes(4); buf.read_int(); buf.read_int()
-        saved = buf.tell()
+        return _minimal_fallback_impl(data, bin_path)
+    finally:
+        ib_log.setLevel(prev_level)
+
+
+def _minimal_fallback_impl(data: bytes, bin_path: str):
+    for num_versions in (2, 1):
         try:
-            buf.read_int(); buf.read_float_min(100.0)
-        except BufferError:
-            buf.seek(saved)
-        images = _read_images(buf)
-        if not images:
-            log.error("Minimal fallback: no images found.")
-            return None, None, None
-        clip_name = os.path.splitext(os.path.basename(bin_path))[0]
-        log.info("Minimal fallback: %d images, 1 synthetic clip.", len(images))
-        return images, [_make_pseudo_clip(clip_name, images)], []
-    except Exception as exc:
-        log.error("Minimal fallback failed: %s", exc)
-        return None, None, None
+            buf = InputBuffer(data)
+            buf.read_bytes(4)
+            for _ in range(num_versions):
+                buf.read_int()
+            saved = buf.tell()
+            try:
+                buf.read_int(); buf.read_float_min(100.0)
+            except BufferError:
+                buf.seek(saved)
+            images = _read_images(buf)
+            if images:
+                clip_name = os.path.splitext(os.path.basename(bin_path))[0]
+                log.info("Minimal fallback (versions=%d): %d images, 1 synthetic clip.",
+                         num_versions, len(images))
+                return images, [_make_pseudo_clip(clip_name, images)], []
+        except Exception as exc:
+            log.debug("Minimal fallback versions=%d failed: %s", num_versions, exc)
+    log.error("Minimal fallback: no images found.")
+    return None, None, None

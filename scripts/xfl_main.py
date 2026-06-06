@@ -15,6 +15,10 @@ import logging
 import os
 import sys
 
+# Register library subfolders on sys.path so flat project imports resolve.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import _paths  # noqa: F401
+
 
 def main():
     p = argparse.ArgumentParser(description="Export FBIN / RawBin animation to Adobe Animate XFL")
@@ -49,11 +53,6 @@ def main():
         print(f"ERROR: bin file not found: {bin_path}"); sys.exit(1)
     if not os.path.isfile(atlas_path):
         print(f"ERROR: atlas PNG not found: {atlas_path}"); sys.exit(1)
-
-    # ── add script directory to path so all modules are importable ────────────
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    if script_dir not in sys.path:
-        sys.path.insert(0, script_dir)
 
     # ── step 1: parse the .bin file ───────────────────────────────────────────
     print("=" * 60)

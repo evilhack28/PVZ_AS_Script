@@ -32,6 +32,10 @@ import logging
 import os
 import sys
 
+# Register library subfolders on sys.path so flat project imports resolve.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import _paths  # noqa: F401
+
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -104,8 +108,17 @@ def main() -> None:
     # ── Derive the bin stem (used as export folder and default define key) ────
     bin_stem = os.path.splitext(os.path.basename(args.bin))[0]
 
+    if not os.path.isfile(args.bin):
+        print(f"Error: bin file not found: {args.bin}")
+        pygame.quit()
+        sys.exit(1)
+
     log.info("Loading animation data: %s", args.bin)
     images, movie_clips, actions, is_rawbin = parse_fbin(args.bin)
+    if images is None or movie_clips is None:
+        print(f"Error: failed to parse '{args.bin}'")
+        pygame.quit()
+        sys.exit(1)
 
     # ── Terminal summary ──────────────────────────────────────────────────────
     # Meta status (needed for the summary, computed before the meta-load block)
@@ -231,6 +244,7 @@ def main() -> None:
         start_action  = args.action,
         loop          = not args.no_loop,
         pvr_name      = tex_stem,
+        output_dir    = os.path.dirname(os.path.abspath(args.bin)),
     )
 
     try:

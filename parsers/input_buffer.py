@@ -91,7 +91,7 @@ class InputBuffer:
         1  → int8  / divisor
         2  → int16 / divisor
         3  → int32 / divisor
-        4  → raw IEEE-754 float32
+        4  → int32 / divisor (same as tag 3; used when value exceeds int16 range)
         """
         tag = self.read_byte()
         if tag == 0:
@@ -104,9 +104,7 @@ class InputBuffer:
             val = struct.unpack_from('<h', self.data, self.offset)[0]
             self.offset += 2
             return val / divisor
-        elif tag == 3:
-            return float(self.read_int()) / divisor
-        elif tag == 4:
+        elif tag in (3, 4):
             return float(self.read_int()) / divisor
         else:
             log.warning("Unknown FloatMin tag %d at offset %d – defaulting to 0.0",

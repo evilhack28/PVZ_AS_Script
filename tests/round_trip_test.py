@@ -9,9 +9,14 @@ Usage
     python round_trip_test.py path/to/file.bin --save rebuilt.bin
 """
 
+import os
 import sys
 import argparse
 import hashlib
+
+# Register library subfolders on sys.path so flat project imports resolve.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import _paths  # noqa: F401
 
 from rawbin_writer import parse_rawbin_full, write_rawbin
 

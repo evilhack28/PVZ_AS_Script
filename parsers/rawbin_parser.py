@@ -145,9 +145,10 @@ def _try_parse_clips(data, start, num_mc, export_table, hdr_size):
     clips = []
     for ci in range(num_mc):
         if off + hdr_size > len(data): return None
-        nf = struct.unpack_from('<H', data, off)[0]
-        fr = struct.unpack_from('<H', data, off + 2)[0]
-        off += hdr_size
+        nf      = struct.unpack_from('<H', data, off)[0]
+        # The next u16 is empirically a sequential clip index (matches `ci`)
+        # in all observed samples — NOT a frame rate. Skip it.
+        off    += hdr_size
         if nf > MAX_FRAMES: return None
         frames = []
         for _fi in range(nf):
