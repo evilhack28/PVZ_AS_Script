@@ -36,6 +36,11 @@ class PlayerConfig:
     output_dir:     str   = "."         # base directory for all exports (GIF/XFL/sprites/atlas/JSON)
     fps_mode:       str   = "meta"      # 'source' | 'meta' | 'custom'
     fps_custom:     int   = 30          # fps used when fps_mode == 'custom'
+    show_help:      bool  = False       # ? overlay
+    fullscreen:     bool  = False       # F11 toggle
+    zoom:           float = 1.0         # mouse wheel zoom
+    pan_x:          float = 0.0         # right-drag pan (screen pixels)
+    pan_y:          float = 0.0
 
 
 # ── Player core ───────────────────────────────────────────────────────────────
@@ -92,6 +97,21 @@ class _PlayerCore:
         # RawBin auto-centering: cache per mc_idx of (dx, dy) shift
         self._rawbin_offsets: dict  = {}
         self._rawbin_center_offset: tuple = (0.0, 0.0)
+
+        # View state (zoom/pan/fullscreen/help) — seeded from config, mutated by InputMixin
+        self.show_help    = bool(self.cfg.show_help)
+        self.fullscreen   = bool(self.cfg.fullscreen)
+        self.zoom         = float(self.cfg.zoom)
+        self.pan_x        = float(self.cfg.pan_x)
+        self.pan_y        = float(self.cfg.pan_y)
+        # Stored windowed (w, h) before fullscreen, so F11 can restore it
+        self._windowed_size: tuple = (self.cfg.window_width, self.cfg.window_height)
+        # Scrub bar geometry — set by HudMixin each frame, read by InputMixin click handler
+        self._scrub_bar_rect = None
+        # Right-button drag-pan state
+        self._pan_origin = None   # (mouse_x, mouse_y, pan_x_start, pan_y_start) | None
+        # Left-button scrub-drag state (True while held inside the scrub bar)
+        self._scrub_dragging = False
 
     # ── Meta helpers ──────────────────────────────────────────────────────────
 
@@ -153,9 +173,12 @@ class _PlayerCore:
         cx = screen_w * 0.5
         cy = screen_h * 0.5
 
+        z = self.zoom
+        px, py = self.pan_x, self.pan_y
+
         if meta_cfg is None:
             ox, oy = self._rawbin_center_offset
-            return (1.0, 0.0, 0.0, -1.0, cx - ox, cy - oy)
+            return (z, 0.0, 0.0, -z, cx - ox + px, cy - oy + py)
 
         s   = meta_cfg.scale if meta_cfg.scale > 0 else 1.0
         # offset_x/y represent the FOOT (ground contact) position within the
@@ -168,7 +191,7 @@ class _PlayerCore:
         # Horizontal flip: negate the X scale column
         sx = -s if meta_cfg.flip else s
 
-        return (sx, 0.0, 0.0, -s, tx, ty)
+        return (sx * z, 0.0, 0.0, -s * z, tx + px, ty + py)
 
     def _probe_rawbin_center(self, mc_idx: int,
                              a_start: int, a_end: int) -> tuple:
@@ -292,14 +315,49 @@ class _PlayerCore:
             self._gif_msg_ttl = 180
             log.error("Meta reload failed: %s", exc)
 
+    # ── View helpers (zoom/pan/fullscreen/screenshot) ─────────────────────────
+
+    def _reset_view(self) -> None:
+        self.zoom = 1.0
+        self.pan_x = 0.0
+        self.pan_y = 0.0
+
+    def _toggle_fullscreen(self) -> None:
+        self.fullscreen = not self.fullscreen
+        if self.fullscreen:
+            self._windowed_size = self.screen.get_size()
+            self.screen = pygame.display.set_mode(
+                (0, 0), pygame.FULLSCREEN | pygame.RESIZABLE)
+        else:
+            self.screen = pygame.display.set_mode(
+                self._windowed_size, pygame.RESIZABLE)
+
+    def _screenshot(self, action_name: str, frame_idx: int) -> None:
+        """Save the current screen surface as PNG next to the .bin."""
+        stem = self.cfg.pvr_name or "player"
+        safe_action = "".join(ch if ch.isalnum() or ch in "._-" else "_"
+                              for ch in action_name)
+        path = os.path.join(
+            self.cfg.output_dir,
+            f"{stem}_{safe_action}_f{frame_idx:04d}.png",
+        )
+        try:
+            pygame.image.save(self.screen, path)
+            self._gif_msg     = f"Screenshot saved: {os.path.basename(path)}"
+            self._gif_msg_ttl = 180
+            log.info("Screenshot saved: %s", path)
+        except Exception as exc:
+            self._gif_msg     = f"Screenshot failed: {exc}"
+            self._gif_msg_ttl = 180
+            log.error("Screenshot failed: %s", exc)
+
     # ── Entry point ───────────────────────────────────────────────────────────
 
     def run(self) -> None:
         pygame.display.set_caption("Cocos Animation Player")
-        self.screen = pygame.display.set_mode(
-            (self.cfg.window_width, self.cfg.window_height),
-            pygame.RESIZABLE,
-        )
+        flags = pygame.RESIZABLE | (pygame.FULLSCREEN if self.fullscreen else 0)
+        size  = (0, 0) if self.fullscreen else (self.cfg.window_width, self.cfg.window_height)
+        self.screen = pygame.display.set_mode(size, flags)
         self.clock    = pygame.time.Clock()
         self.font     = pygame.font.SysFont("Arial", self.cfg.hud_font_size)
         self.font_big = pygame.font.SysFont("Arial", self.cfg.hud_font_size + 4, bold=True)

@@ -1,9 +1,119 @@
 """
 HUD overlay + action picker drawing.
 Lives on the Player class as a mixin; consumes self.screen, self.font, self.playlist etc.
+
+Layout
+------
+Top-left      : row of status pills (action, frame, fps mode, speed, loop/pause).
+Bottom-left   : scrub bar with frame labels; clickable (hit-tested in input.py
+                via the `_scrub_bar_rect` field stored on the player).
+Bottom-right  : "Press ? for keys" hint.
+Centre        : help overlay (toggled with `?`) and the frame/fps input prompts.
 """
 
 import pygame
+
+
+# Flat palette — tweak here to retheme the HUD.
+_PAL = {
+    "bg":          (14, 16, 24, 215),
+    "border":      (60, 70, 110, 200),
+    "pill_bg":     (28, 32, 46, 230),
+    "pill_text":   (235, 238, 245),
+    "pill_dim":    (140, 150, 170),
+    "accent":      (110, 175, 255),
+    "accent_dim":  (60, 110, 175),
+    "good":        (110, 220, 140),
+    "warn":        (255, 200, 90),
+    "pause":       (255, 150, 90),
+    "scrub_bg":    (45, 50, 65),
+    "scrub_fill":  (110, 175, 255),
+    "scrub_tick":  (235, 238, 245),
+    "hint":        (130, 138, 160),
+    "overlay":     (0, 0, 0, 195),
+    "section":     (255, 220, 110),
+    "section_dim": (180, 200, 230),
+}
+
+_FPS_LABEL = {"source": "SRC", "meta": "META", "custom": "CUST"}
+
+# Help overlay content — grouped, two columns.
+_HELP_SECTIONS = [
+    ("Navigation", [
+        ("← / →",          "Previous / next action"),
+        ("I",              "Open action picker"),
+    ]),
+    ("Playback", [
+        ("SPACE",          "Pause / resume"),
+        ("N / B",          "Step one frame fwd / back"),
+        ("F",              "Jump to frame (type, Enter)"),
+        ("L",              "Toggle loop"),
+        ("↑ / ↓",          "Speed ±0.1×"),
+    ]),
+    ("FPS", [
+        ("R",              "Cycle fps mode"),
+        ("1 / 2 / 3",      "Set fps mode src / meta / custom"),
+        ("4",              "Enter custom fps"),
+    ]),
+    ("View", [
+        ("Mouse wheel",    "Zoom in / out"),
+        ("Right drag",     "Pan canvas"),
+        ("Left click bar", "Seek to frame"),
+        ("0",              "Reset zoom & pan"),
+        ("F11",            "Toggle fullscreen"),
+        ("PrtScr",         "Save screenshot"),
+        ("H",              "Toggle HUD"),
+        ("?",              "Toggle this help"),
+    ]),
+    ("Export", [
+        ("G / A / Z",      "GIF (current / all / all no-bg)"),
+        ("S / T",          "Sprites / atlas PNG"),
+        ("X / J",          "XFL / JSON dump"),
+    ]),
+    ("Meta", [
+        ("M",              "Reload metadata file"),
+    ]),
+]
+
+
+def _draw_pill(surface, font, label, value, pos, value_color=None, value_bold=False):
+    """Render a "Label  VALUE" pill at `pos`. Returns the rect (for stacking)."""
+    pad_x, pad_y = 9, 5
+    gap = 6
+    lbl_surf = font.render(label, True, _PAL["pill_dim"])
+    val_font = font  # keep single font; bold is purely a colour cue here
+    val_col  = value_color or _PAL["pill_text"]
+    val_surf = val_font.render(value, True, val_col)
+
+    w = lbl_surf.get_width() + gap + val_surf.get_width() + pad_x * 2
+    h = max(lbl_surf.get_height(), val_surf.get_height()) + pad_y * 2
+    rect = pygame.Rect(pos[0], pos[1], w, h)
+
+    bg = pygame.Surface((w, h), pygame.SRCALPHA)
+    bg.fill(_PAL["pill_bg"])
+    surface.blit(bg, rect.topleft)
+    pygame.draw.rect(surface, _PAL["border"], rect, 1)
+
+    y = pos[1] + (h - lbl_surf.get_height()) // 2
+    surface.blit(lbl_surf, (pos[0] + pad_x, y))
+    y = pos[1] + (h - val_surf.get_height()) // 2
+    surface.blit(val_surf, (pos[0] + pad_x + lbl_surf.get_width() + gap, y))
+    return rect
+
+
+def _draw_icon_pill(surface, font, text, pos, color):
+    """Single-text pill (no label/value split) — used for LOOP / PAUSE markers."""
+    pad_x, pad_y = 10, 5
+    surf = font.render(text, True, color)
+    w = surf.get_width() + pad_x * 2
+    h = surf.get_height() + pad_y * 2
+    rect = pygame.Rect(pos[0], pos[1], w, h)
+    bg = pygame.Surface((w, h), pygame.SRCALPHA)
+    bg.fill(_PAL["pill_bg"])
+    surface.blit(bg, rect.topleft)
+    pygame.draw.rect(surface, _PAL["border"], rect, 1)
+    surface.blit(surf, (pos[0] + pad_x, pos[1] + pad_y))
+    return rect
 
 
 class HudMixin:
@@ -19,117 +129,184 @@ class HudMixin:
         total   = action_end - action_start + 1
         local   = frame_idx - action_start
         n_act   = len(self.playlist)
-
         sw, sh = self.screen.get_size()
 
-        # GIF export status message (temporary, centred at bottom)
+        # Temporary status message (screenshot saved, GIF exported, etc.)
         if self._gif_msg_ttl > 0:
             self._gif_msg_ttl -= 1
-            surf = self.font_big.render(self._gif_msg, True, (80, 255, 100))
+            surf = self.font_big.render(self._gif_msg, True, _PAL["good"])
             rect = surf.get_rect(center=(sw // 2, sh - 36))
             bg = pygame.Surface((rect.width + 24, rect.height + 12), pygame.SRCALPHA)
             bg.fill((0, 0, 0, 180))
             self.screen.blit(bg, (rect.left - 12, rect.top - 6))
             self.screen.blit(surf, rect)
 
+        # Help overlay swallows the rest of the HUD when active.
+        if self.show_help:
+            self._draw_help_overlay()
+            return
+
         if not self.show_hud:
+            self._scrub_bar_rect = None
             if self.show_list:
                 self._draw_action_list()
             return
 
-        loop_tag  = "LOOP" if self.loop else "ONCE"
-        pause_tag = " PAUSED" if self.paused else ""
+        # ── Status pill row (top-left) ────────────────────────────────────────
+        pill_x, pill_y = 8, 8
+        gap = 6
 
-        # Top-left info block
-        line1 = "{} [{}/{}]  {}".format(
-            action['name'], self.current_idx + 1, n_act, mc['name'])
-        _fps_mode_label = {'source': 'SRC', 'meta': 'META', 'custom': 'CUST'}
-        _mode_tag = _fps_mode_label.get(self.fps_mode, self.fps_mode.upper())
-        line2 = "Frame {}/{}  |  {}fps [{}]  |  Speed {}x  |  {}  |  Render {:.0f}fps{}".format(
-            local, total - 1, anim_fps, _mode_tag,
-            "{:.1f}".format(self.speed),
-            loop_tag, clk_fps, pause_tag)
+        action_label = f"{action['name']}  [{self.current_idx + 1}/{n_act}]"
+        r = _draw_pill(self.screen, self.font, "ACT", action_label,
+                       (pill_x, pill_y), value_color=_PAL["accent"])
+        pill_x = r.right + gap
+
+        frame_label = f"{local}/{total - 1}"
+        r = _draw_pill(self.screen, self.font, "FRAME", frame_label,
+                       (pill_x, pill_y))
+        pill_x = r.right + gap
+
+        fps_label = f"{anim_fps} {_FPS_LABEL.get(self.fps_mode, self.fps_mode.upper())}"
+        r = _draw_pill(self.screen, self.font, "FPS", fps_label,
+                       (pill_x, pill_y), value_color=_PAL["good"])
+        pill_x = r.right + gap
+
+        r = _draw_pill(self.screen, self.font, "SPD", f"{self.speed:.1f}x",
+                       (pill_x, pill_y))
+        pill_x = r.right + gap
+
+        loop_color = _PAL["good"] if self.loop else _PAL["pill_dim"]
+        r = _draw_icon_pill(self.screen, self.font,
+                            ("LOOP" if self.loop else "ONCE"),
+                            (pill_x, pill_y), loop_color)
+        pill_x = r.right + gap
+
+        if self.paused:
+            r = _draw_icon_pill(self.screen, self.font, "PAUSED",
+                                (pill_x, pill_y), _PAL["pause"])
+            pill_x = r.right + gap
+
+        # Second row: render fps + a meta/raw badge (small, dim)
+        meta_y = pill_y + r.height + 4
         if meta_cfg is not None:
-            line3 = "Meta  scale={:.2f}  offset=({:.0f},{:.0f})  flip={}".format(
-                meta_cfg.scale, meta_cfg.offset_x, meta_cfg.offset_y,
-                'Y' if meta_cfg.flip else 'N')
+            meta_txt = (f"meta  scale {meta_cfg.scale:.2f}  "
+                        f"off ({meta_cfg.offset_x:.0f},{meta_cfg.offset_y:.0f})  "
+                        f"flip {'Y' if meta_cfg.flip else 'N'}  "
+                        f"render {clk_fps:.0f}fps")
         else:
-            fmt = ' [RawBin]' if self.renderer.rawbin else ''
-            line3 = "MC idx={}  frames={}  action {}-{}{}".format(
-                mc_idx, len(mc['frames']), action_start, action_end, fmt)
+            fmt = "RawBin" if self.renderer.rawbin else "FBIN"
+            meta_txt = (f"{fmt}  mc {mc_idx}  frames {len(mc['frames'])}  "
+                        f"action {action_start}-{action_end}  "
+                        f"render {clk_fps:.0f}fps")
+        meta_surf = self.font.render(meta_txt, True, _PAL["pill_dim"])
+        self.screen.blit(meta_surf, (10, meta_y))
 
-        colours = [(240, 240, 240), (180, 210, 255), (160, 255, 160)]
-        surfs   = [self.font.render(l, True, c) for l, c in zip(
-                   [line1, line2, line3], colours)]
-
-        pad = 8
-        bw  = max(s.get_width() for s in surfs) + pad * 2
-        bh  = sum(s.get_height() for s in surfs) + pad + 6 * len(surfs)
-        bg  = pygame.Surface((bw, bh), pygame.SRCALPHA)
-        bg.fill((0, 0, 0, 155))
-        self.screen.blit(bg, (6, 6))
-        y = 6 + pad // 2
-        for s in surfs:
-            self.screen.blit(s, (6 + pad, y))
-            y += s.get_height() + 4
-
-        # Bottom key hints
-        hints = ("</>action  SPACE pause  N/B step  F jump  UP/DN speed  L loop  "
-                 "R fps-mode  1=src 2=meta 3=custom 4=set-fps  M reload-meta  "
-                 "I list  G gif  A allgifs  Z allgifs(nobg)  S sprites  T atlas  X xfl  J json  H hud")
-        hsurf = self.font.render(hints, True, (150, 150, 150))
-        hbg   = pygame.Surface((hsurf.get_width() + 16, hsurf.get_height() + 8),
-                                pygame.SRCALPHA)
-        hbg.fill((0, 0, 0, 140))
-        hint_y = sh - hsurf.get_height() - 14
-        self.screen.blit(hbg,  (6, hint_y))
-        self.screen.blit(hsurf, (14, hint_y + 4))
-
-        # Scrub bar (above hint bar)
-        bar_h  = 6
-        bar_y  = hint_y - bar_h - 5
-        bar_x  = 6
-        bar_w  = sw - 12
-        prog   = (local / max(1, total - 1))
-        pygame.draw.rect(self.screen, (55,  55,  55),  (bar_x, bar_y, bar_w, bar_h))
-        pygame.draw.rect(self.screen, (70, 150, 255),  (bar_x, bar_y, int(bar_w * prog), bar_h))
+        # ── Scrub bar (above hint) ────────────────────────────────────────────
+        bar_h = 8
+        bar_y = sh - 22
+        bar_x = 8
+        bar_w = sw - 16
+        prog = (local / max(1, total - 1))
+        pygame.draw.rect(self.screen, _PAL["scrub_bg"],
+                         (bar_x, bar_y, bar_w, bar_h), border_radius=3)
+        fill_w = max(1, int(bar_w * prog))
+        pygame.draw.rect(self.screen, _PAL["scrub_fill"],
+                         (bar_x, bar_y, fill_w, bar_h), border_radius=3)
         tick_x = bar_x + int(bar_w * prog)
-        pygame.draw.rect(self.screen, (220, 220, 255), (tick_x - 1, bar_y - 3, 3, bar_h + 6))
-        lbl_l = self.font.render(str(action_start), True, (120, 120, 120))
-        lbl_r = self.font.render(str(action_end),   True, (120, 120, 120))
-        self.screen.blit(lbl_l, (bar_x,            bar_y - lbl_l.get_height() - 2))
+        pygame.draw.rect(self.screen, _PAL["scrub_tick"],
+                         (tick_x - 2, bar_y - 4, 4, bar_h + 8), border_radius=1)
+        # Frame labels above the bar
+        lbl_l = self.font.render(str(action_start), True, _PAL["hint"])
+        lbl_r = self.font.render(str(action_end),   True, _PAL["hint"])
+        self.screen.blit(lbl_l, (bar_x, bar_y - lbl_l.get_height() - 2))
         self.screen.blit(lbl_r, (bar_x + bar_w - lbl_r.get_width(),
                                   bar_y - lbl_r.get_height() - 2))
-        lbl_cur = self.font.render(str(local), True, (200, 220, 255))
+        lbl_cur = self.font.render(str(local), True, _PAL["accent"])
         cx = max(bar_x, min(bar_x + bar_w - lbl_cur.get_width(),
-                             tick_x - lbl_cur.get_width() // 2))
+                            tick_x - lbl_cur.get_width() // 2))
         self.screen.blit(lbl_cur, (cx, bar_y - lbl_cur.get_height() - 2))
 
-        # Frame-number input overlay
+        # Expose the bar rect for the input handler's click-to-seek.
+        # Bias the hit-test slightly above and below so the bar is easy to hit.
+        self._scrub_bar_rect = pygame.Rect(bar_x, bar_y - 4, bar_w, bar_h + 8)
+
+        # ── "Press ? for keys" hint (bottom-right) ────────────────────────────
+        hint = self.font.render("Press ? for keys", True, _PAL["hint"])
+        self.screen.blit(hint, (sw - hint.get_width() - 12,
+                                bar_y - hint.get_height() - 6))
+
+        # ── Frame-number input overlay ────────────────────────────────────────
         if self._frame_input_active:
             prompt = "Go to frame: {}_".format(self._frame_input_buf)
-            psurf  = self.font_big.render(prompt, True, (255, 230, 80))
+            psurf  = self.font_big.render(prompt, True, _PAL["warn"])
             px     = sw // 2 - psurf.get_width() // 2
             py     = sh // 2 - psurf.get_height() // 2
             bg2    = pygame.Surface((psurf.get_width() + 24,
                                      psurf.get_height() + 16), pygame.SRCALPHA)
             bg2.fill((0, 0, 0, 210))
-            self.screen.blit(bg2,  (px - 12, py - 8))
+            self.screen.blit(bg2,   (px - 12, py - 8))
             self.screen.blit(psurf, (px,      py))
 
         if self._fps_input_active:
             prompt = "Custom FPS: {}_  (common: 24 30 60 120)".format(self._fps_input_buf)
-            psurf  = self.font_big.render(prompt, True, (80, 255, 200))
+            psurf  = self.font_big.render(prompt, True, _PAL["good"])
             px     = sw // 2 - psurf.get_width() // 2
             py     = sh // 2 + 40
             bg2    = pygame.Surface((psurf.get_width() + 24,
                                      psurf.get_height() + 16), pygame.SRCALPHA)
             bg2.fill((0, 0, 0, 210))
-            self.screen.blit(bg2,  (px - 12, py - 8))
+            self.screen.blit(bg2,   (px - 12, py - 8))
             self.screen.blit(psurf, (px,      py))
 
         if self.show_list:
             self._draw_action_list()
+
+    def _draw_help_overlay(self) -> None:
+        """Full-screen darkened backdrop listing every key binding by section."""
+        sw, sh = self.screen.get_size()
+        overlay = pygame.Surface((sw, sh), pygame.SRCALPHA)
+        overlay.fill(_PAL["overlay"])
+        self.screen.blit(overlay, (0, 0))
+
+        title = self.font_big.render("Keyboard & Mouse", True, _PAL["section"])
+        self.screen.blit(title, (sw // 2 - title.get_width() // 2, 28))
+        sub = self.font.render("Press ? or ESC to close", True, _PAL["section_dim"])
+        self.screen.blit(sub, (sw // 2 - sub.get_width() // 2, 28 + title.get_height() + 4))
+
+        # Two-column flow of sections
+        col_gap = 40
+        col_w   = (sw - col_gap * 3) // 2
+        x0      = col_gap
+        x1      = col_gap * 2 + col_w
+        top_y   = 90
+        y_left  = top_y
+        y_right = top_y
+        cur_x   = x0
+        cur_y   = y_left
+        sect_h  = self.font_big.get_height() + 6
+        line_h  = self.font.get_height() + 4
+
+        # Estimate section heights to balance the columns
+        for idx, (section_name, items) in enumerate(_HELP_SECTIONS):
+            block_h = sect_h + line_h * len(items) + 14
+            # Place into shorter column
+            if y_left <= y_right:
+                cur_x, cur_y = x0, y_left
+                y_left += block_h
+            else:
+                cur_x, cur_y = x1, y_right
+                y_right += block_h
+
+            sect_surf = self.font_big.render(section_name, True, _PAL["section"])
+            self.screen.blit(sect_surf, (cur_x, cur_y))
+            cur_y += sect_h
+            for key, desc in items:
+                key_surf  = self.font.render(key, True, _PAL["accent"])
+                desc_surf = self.font.render(desc, True, _PAL["pill_text"])
+                self.screen.blit(key_surf, (cur_x + 12, cur_y))
+                self.screen.blit(desc_surf,
+                                 (cur_x + 12 + 150, cur_y))
+                cur_y += line_h
 
     def _draw_action_list(self) -> None:
         """Compact action picker anchored to the top-right corner."""
@@ -158,11 +335,11 @@ class HudMixin:
         panel_y = 6
 
         panel = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
-        panel.fill((12, 14, 22, 235))
-        pygame.draw.rect(panel, (70, 80, 130, 220), (0, 0, panel_w, panel_h), 1)
+        panel.fill(_PAL["bg"])
+        pygame.draw.rect(panel, _PAL["border"], (0, 0, panel_w, panel_h), 1)
         self.screen.blit(panel, (panel_x, panel_y))
 
-        hsurf = self.font_big.render(header_text, True, (200, 200, 100))
+        hsurf = self.font_big.render(header_text, True, _PAL["section"])
         self.screen.blit(hsurf, (panel_x + 10, panel_y + 8))
 
         half   = visible // 2

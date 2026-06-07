@@ -25,16 +25,21 @@ Options
 --action     INT    Starting action index (default: 0)
 --no-loop           Start with looping disabled
 --log-level  LVL    Logging level: DEBUG, INFO, WARNING, ERROR (default: INFO)
+--quiet             Suppress the load summary block
+--no-color          Disable ANSI colors in terminal output
 """
 
 import argparse
 import logging
 import os
 import sys
+from time import perf_counter
 
 # Register library subfolders on sys.path so flat project imports resolve.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import _paths  # noqa: F401
+
+import _term
 
 
 def _parse_args() -> argparse.Namespace:
@@ -69,6 +74,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--log-level", default="INFO",
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
                         help="Logging verbosity (default: INFO)")
+    parser.add_argument("--quiet",     action="store_true",
+                        help="Suppress the load summary block (shortcut for --log-level WARNING)")
+    parser.add_argument("--no-color",  action="store_true",
+                        help="Disable ANSI colors in terminal output")
     return parser.parse_args()
 
 
@@ -88,10 +97,26 @@ def main() -> None:
         print("  --atlas expects a .png / .bmp image file")
         sys.exit(1)
 
-    logging.basicConfig(
-        level=getattr(logging, args.log_level),
-        format="%(levelname)-8s %(name)s: %(message)s",
-    )
+    # On Windows the default stdout codec is cp1252 and will choke on common
+    # unicode characters in log messages / file paths. Reconfigure to UTF-8 if
+    # available (Python 3.7+), and replace any unencodable codepoints so the
+    # process never crashes on a print().
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):
+        pass
+
+    _term.set_enabled(_term.supports_color(args.no_color))
+
+    log_level = logging.WARNING if args.quiet else getattr(logging, args.log_level)
+    _root = logging.getLogger()
+    _root.setLevel(log_level)
+    for _h in list(_root.handlers):
+        _root.removeHandler(_h)
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(_term.ColorFormatter())
+    _root.addHandler(_handler)
     log = logging.getLogger(__name__)
 
     try:
@@ -100,7 +125,9 @@ def main() -> None:
         print("Error: pygame is not installed.  Run:  pip install pygame")
         sys.exit(1)
 
+    _t_pygame_start = perf_counter()
     pygame.init()
+    _t_pygame_end = perf_counter()
 
     from fbin_parser import parse_fbin
     from player      import Player, PlayerConfig
@@ -113,15 +140,16 @@ def main() -> None:
         pygame.quit()
         sys.exit(1)
 
-    log.info("Loading animation data: %s", args.bin)
+    log.debug("Loading animation data: %s", args.bin)
+    _t_parse_start = perf_counter()
     images, movie_clips, actions, is_rawbin = parse_fbin(args.bin)
+    _t_parse_end = perf_counter()
     if images is None or movie_clips is None:
         print(f"Error: failed to parse '{args.bin}'")
         pygame.quit()
         sys.exit(1)
 
-    # ── Terminal summary ──────────────────────────────────────────────────────
-    # Meta status (needed for the summary, computed before the meta-load block)
+    # Meta status (auto-detected only — computed before the meta-load block)
     _meta_status = "none"
     if not getattr(args, 'no_meta', False):
         if getattr(args, 'meta', None):
@@ -134,21 +162,18 @@ def main() -> None:
                     _meta_status = f"animaction.txt ({_d})"
                     break
 
-    fmt_tag = "RawBin" if is_rawbin else "FBIN"
-    print()
-    print(f"Code_Name  : {bin_stem}")
-    print(f"Format     : {fmt_tag}  |  Images: {len(images)}  Clips: {len(movie_clips)}  Actions: {len(actions)}")
-    print(f"Meta       : {_meta_status}")
-
-    if actions:
-        print()
-        for act in actions:
-            midx = act.get('mc_idx', -1)
-            mc   = movie_clips[midx] if 0 <= midx < len(movie_clips) else None
-            mcn  = mc['name'] if mc else '?'
-            print(f"  Action : {act.get('name', '?'):<20s}  →  Movie_Clip : {mcn}")
-
-    print()
+    # Build a human-readable format tag like "FBIN v1.0" / "RawBin (6-byte clip)".
+    # LAST_INFO is populated by the successful parse path in fbin_parser /
+    # rawbin_parser; fall back to a plain tag if it's empty (shouldn't happen
+    # in practice, but keeps the summary safe).
+    if is_rawbin:
+        from rawbin_parser import LAST_INFO as _RB_INFO
+        _hdr = _RB_INFO.get("clip_header_size")
+        fmt_tag = f"RawBin  ({_hdr}-byte clip)" if _hdr else "RawBin"
+    else:
+        from fbin_parser import LAST_INFO as _FB_INFO
+        _vtag = _FB_INFO.get("version_tag")
+        fmt_tag = f"FBIN  {_vtag}" if _vtag else "FBIN"
 
     # ── Load optional metadata ────────────────────────────────────────────────
     # Priority: --meta path > auto-discovered animaction.txt > nothing
@@ -171,7 +196,7 @@ def main() -> None:
                 _auto_path = os.path.join(_search_dir, "animaction.txt")
                 if os.path.isfile(_auto_path):
                     meta_source = _auto_path
-                    log.info("Auto-detected metadata: %s", _auto_path)
+                    log.debug("Auto-detected metadata: %s", _auto_path)
                     break
             if not meta_source:
                 log.debug("animaction.txt not found in: %s",
@@ -186,7 +211,7 @@ def main() -> None:
             AnimMeta = None
 
     if meta_source and AnimMeta is not None:
-        log.info("Loading animation metadata: %s", meta_source)
+        log.debug("Loading animation metadata: %s", meta_source)
         anim_meta = AnimMeta.load(action_tsv=meta_source, particle_tsv=meta_source)
         if anim_meta.is_empty():
             log.warning("Metadata file loaded but contained no recognised tables.")
@@ -203,13 +228,14 @@ def main() -> None:
     tex_stem  = bin_stem
     _pvr_info = None
 
+    _t_tex_start = perf_counter()
     if args.atlas:
-        log.info("Loading atlas image: %s", args.atlas)
+        log.debug("Loading atlas image: %s", args.atlas)
         try:
             texture  = pygame.image.load(args.atlas).convert_alpha()
             w, h     = texture.get_size()
             tex_stem = os.path.splitext(os.path.basename(args.atlas))[0]
-            log.info("Atlas loaded: %dx%d", w, h)
+            log.debug("Atlas loaded: %dx%d", w, h)
             _pvr_info = None
         except Exception as exc:
             log.error("Failed to load atlas '%s': %s", args.atlas, exc)
@@ -218,23 +244,47 @@ def main() -> None:
     if texture is None and args.pvr:
         from pvr_loader import load_pvr_texture, probe_pvr
         _pvr_info = probe_pvr(args.pvr)
-        log.info("Loading texture: %s", args.pvr)
+        log.debug("Loading texture: %s", args.pvr)
         texture  = load_pvr_texture(args.pvr)
         tex_stem = os.path.splitext(os.path.basename(args.pvr))[0]
-
-    # ── Texture summary ───────────────────────────────────────────────────────
-    if args.pvr and _pvr_info is not None:
-        p      = _pvr_info
-        status = "OK" if texture is not None else "FAILED"
-        print(f"Texture   : {args.pvr}")
-        print(f"           {p['container']}  {p['width']}x{p['height']}  "
-              f"{p['format_name']} ({p['bpp']}bpp)  {status}")
-        print()
+    _t_tex_end = perf_counter()
 
     if not images or not movie_clips or texture is None:
         log.error("Failed to load required resources – aborting.")
         pygame.quit()
         sys.exit(1)
+
+    # ── Compact summary block ────────────────────────────────────────────────
+    if not args.quiet:
+        _ms_parse  = (_t_parse_end  - _t_parse_start) * 1000.0
+        _ms_tex    = (_t_tex_end    - _t_tex_start)   * 1000.0
+        _ms_pygame = (_t_pygame_end - _t_pygame_start) * 1000.0
+        _ms_total  = _ms_parse + _ms_tex + _ms_pygame
+        rule = _term.dim("-" * 60)
+
+        print()
+        print(rule)
+        print(f" {_term.cyan(_term.bold(bin_stem))}    {_term.green(fmt_tag)}")
+        print(f" images {_term.bold(str(len(images)))}    "
+              f"clips {_term.bold(str(len(movie_clips)))}    "
+              f"actions {_term.bold(str(len(actions)))}    "
+              f"meta {_term.dim(_meta_status)}")
+        if _pvr_info is not None:
+            p = _pvr_info
+            tex_dim = f"{p['width']}x{p['height']}"
+            print(f" texture {_term.bold(tex_dim)}  "
+                  f"{p['format_name']} ({p['bpp']}bpp)")
+        elif args.atlas and texture is not None:
+            w, h = texture.get_size()
+            tex_dim = f"{w}x{h}"
+            print(f" texture {_term.bold(tex_dim)}  atlas image")
+        print(_term.dim(
+            f" load    {_ms_total:.0f}ms   "
+            f"(parse {_ms_parse:.0f} | pvr {_ms_tex:.0f} | pygame {_ms_pygame:.0f})"
+        ))
+        print(rule)
+        print()
+        sys.stdout.flush()
 
     # ── Launch player ─────────────────────────────────────────────────────────
     cfg = PlayerConfig(

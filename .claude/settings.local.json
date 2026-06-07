@@ -64,7 +64,9 @@
       "Bash(findstr /c:\"render/\" /c:\"player\")",
       "Bash(findstr \"render\")",
       "Bash(del pirate_attack_f*.png pirate_atlas.png pirate_img0_hand.png pirate_OLD.png pirate_NEW.png pirate_compare_*.png pirate_stand_*.png pirate_attack.png pirate_beaten.png pirate_die.png pirate_eat.png pirate_tuck.png pirate_walk.png pirate_stand.png)",
-      "Bash(rmdir /s /q pirate_crops)"
+      "Bash(rmdir /s /q pirate_crops)",
+      "Bash(rm -f hud_normal.png hud_paused.png hud_help.png hud_zoomed.png zhizhu_*.png tudi_*.png sprite_*.png zombie_JourneyWest_zhizhu_*.png zhizhu_full_texture.png)",
+      "Bash(rm -rf sprites_out)"
     ]
   }
 }

@@ -1,11 +1,30 @@
 """
-Keyboard / window event handling.  Mixin for Player.
+Keyboard / mouse / window event handling.  Mixin for Player.
 """
 
 import pygame
 
 
+def _clamp(v, lo, hi):
+    return max(lo, min(hi, v))
+
+
 class InputMixin:
+
+    def _seek_from_mouse(self, mouse_x: int,
+                        action_start: int, action_end: int) -> None:
+        """Translate a mouse-x inside the scrub bar to a frame index."""
+        rect = self._scrub_bar_rect
+        if rect is None or rect.width <= 0:
+            return
+        prog = _clamp((mouse_x - rect.x) / rect.width, 0.0, 1.0)
+        total = action_end - action_start
+        if total <= 0:
+            return
+        target = action_start + int(round(prog * total))
+        target = _clamp(target, action_start, action_end)
+        self._step_frame_idx = target
+        self.paused = True
 
     def _handle_events(self, anim_active: bool, frame_idx: int,
                        action_start: int, action_end: int):
@@ -14,8 +33,46 @@ class InputMixin:
             if event.type == pygame.QUIT:
                 quit_requested = True
             elif event.type == pygame.VIDEORESIZE:
-                self.screen = pygame.display.set_mode(event.size, pygame.RESIZABLE)
+                # Honor fullscreen flag if we're in fullscreen mode
+                flags = pygame.RESIZABLE | (pygame.FULLSCREEN if self.fullscreen else 0)
+                self.screen = pygame.display.set_mode(event.size, flags)
+            elif event.type == pygame.MOUSEWHEEL:
+                # Wheel up → zoom in, wheel down → zoom out
+                factor = 1.1 ** event.y
+                self.zoom = _clamp(self.zoom * factor, 0.25, 8.0)
+            elif event.type == pygame.MOUSEBUTTONDOWN:
+                if event.button == 1:
+                    # Left click: try scrub-bar hit-test
+                    if (self._scrub_bar_rect is not None
+                            and self._scrub_bar_rect.collidepoint(event.pos)):
+                        self._scrub_dragging = True
+                        self._seek_from_mouse(event.pos[0], action_start, action_end)
+                elif event.button == 3:
+                    # Right click: start drag-pan
+                    self._pan_origin = (event.pos[0], event.pos[1],
+                                        self.pan_x, self.pan_y)
+            elif event.type == pygame.MOUSEBUTTONUP:
+                if event.button == 1:
+                    self._scrub_dragging = False
+                elif event.button == 3:
+                    self._pan_origin = None
+            elif event.type == pygame.MOUSEMOTION:
+                if self._pan_origin is not None:
+                    ox, oy, px0, py0 = self._pan_origin
+                    self.pan_x = px0 + (event.pos[0] - ox)
+                    self.pan_y = py0 + (event.pos[1] - oy)
+                elif self._scrub_dragging:
+                    self._seek_from_mouse(event.pos[0], action_start, action_end)
             elif event.type == pygame.KEYDOWN:
+                # `?` toggles the help overlay regardless of keyboard layout.
+                # K_QUESTION is rarely emitted (most layouts produce K_SLASH +
+                # KMOD_SHIFT), so route via event.unicode which always reflects
+                # the produced character. Works even when an input prompt is
+                # active so the user can always discover the close action.
+                if event.unicode == '?':
+                    if not (self._fps_input_active or self._frame_input_active):
+                        self.show_help = not self.show_help
+                        continue
                 if self._fps_input_active:
                     if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
                         if self._fps_input_buf:
@@ -66,6 +123,13 @@ class InputMixin:
 
     def _handle_key(self, key, quit_req, anim_active,
                     frame_idx, action_start, action_end):
+
+        # Help overlay is modal: ESC or Q closes it (so does `?`, handled in
+        # _handle_events). Other keys are swallowed.
+        if self.show_help:
+            if key in (pygame.K_ESCAPE, pygame.K_q):
+                self.show_help = False
+            return quit_req, anim_active
 
         if self.show_list:
             if key in (pygame.K_ESCAPE, pygame.K_i):
@@ -153,5 +217,14 @@ class InputMixin:
             self.show_hud = not self.show_hud
         elif key == pygame.K_m:
             self._reload_meta()
+        elif key == pygame.K_0:
+            self._reset_view()
+            self._gif_msg     = "View reset"
+            self._gif_msg_ttl = 90
+        elif key == pygame.K_F11:
+            self._toggle_fullscreen()
+        elif key == pygame.K_PRINT:
+            action_name = self.playlist[self.current_idx].get('name', 'action')
+            self._screenshot(action_name, frame_idx)
 
         return quit_req, anim_active

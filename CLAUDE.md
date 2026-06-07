@@ -79,6 +79,10 @@ python tests/round_trip_test.py samples/char.bin
 
 Returns `(images, movie_clips, actions, is_rawbin)` — the shared data contract used by every downstream module.
 
+After a successful parse, both modules populate a module-level `LAST_INFO` dict that callers can read for the summary:
+- `fbin_parser.LAST_INFO`: `version_ints`, `version_tag` (e.g. `"v1.0"`), `has_transform`, `order`, `num_versions`, `variant_tag`.
+- `rawbin_parser.LAST_INFO`: `clip_header_size` (4 or 6), `start_offset` (0 or 12), `consumed`, `total`.
+
 ### Shared data structures
 ```
 images      — list of dicts: {name, offset_x, offset_y, width, height, tex_x, tex_y, origin_x, origin_y}
@@ -143,6 +147,13 @@ FPS resolution priority (`_resolve_fps`), per `fps_mode`:
 | X | Export XFL / .fla |
 | J | Dump frame data as JSON |
 | H | Toggle HUD |
+| ? | Toggle help overlay (full key list) |
+| 0 | Reset zoom and pan |
+| F11 | Toggle fullscreen |
+| PrtScr | Save PNG screenshot of current frame |
+| Mouse wheel | Zoom in / out |
+| Right-drag | Pan the canvas |
+| Left-click scrub bar | Seek to that frame (drag to scrub) |
 
 ### Optional metadata (`animaction.txt`)
 A TSV/CSV file providing per-action scale, offset, fps, flip, and frame-range overrides. Auto-discovered in the `.bin` folder → `cwd` → script folder. Loaded via `config/anim_meta.py` (`AnimMeta.load()`). Override with `--meta PATH` or disable with `--no-meta`.
@@ -157,7 +168,7 @@ Hardcoded fallback per-character display settings. **Only for FBIN files** — R
 ## Critical constraints
 
 - **FBIN `offset_x/y`** — Flash registration points. **Never clamp** them; they can legitimately exceed sprite dimensions.
-- **RawBin `offset_x/y`** — Internal anchor within the sprite. Clamp to 0 when `abs(offset) >= sprite_dimension` (export tool artefact).
+- **RawBin `offset_x/y`** — Also Flash registration points. **Never clamp** them either: when the same character is re-exported as FBIN (e.g. `zombie_JourneyWest_tieguo` v32 RawBin vs v33 FBIN) the raw float values match byte-for-byte. An earlier `abs(offset) >= dimension → 0` clamp destroyed legitimate registrations for body parts pivoted at joints.
 - **RawBin world positions are absolute** — do not add character-level scale/offset on top.
 - **`default_settings.py` is FBIN-only** — adding entries for RawBin characters breaks rendering.
 - Renderer skips sprites at `tex_x=0, tex_y=0` with `size ≤ 4×4` (Flash pivot/registration markers; contain PVRTC block garbage).

@@ -35,6 +35,11 @@ MAX_FRAMES         = 8000
 MAX_ELEMENTS       = 4096
 DEFAULT_FRAME_RATE = 30
 
+# Populated by the successful parse path so callers (e.g. scripts/main.py) can
+# show the file's encoded version + variant in their summary.  Reset on each
+# parse_fbin() call.
+LAST_INFO: dict = {}
+
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
@@ -43,6 +48,7 @@ def parse_fbin(bin_path: str):
     Auto-detect FBIN vs RawBin and parse.
     Returns (images, movie_clips, actions, is_rawbin).
     """
+    LAST_INFO.clear()
     try:
         with open(bin_path, 'rb') as fh:
             data = fh.read()
@@ -51,7 +57,7 @@ def parse_fbin(bin_path: str):
         return None, None, None, False
 
     if len(data) < 4 or data[0:4] != b'FBIN':
-        log.info("No FBIN magic — delegating to rawbin_parser.")
+        log.debug("No FBIN magic — delegating to rawbin_parser.")
         try:
             from rawbin_parser import parse_rawbin_from_bytes
             result = parse_rawbin_from_bytes(data)
@@ -98,8 +104,9 @@ def _parse_impl(data: bytes, *, has_transform: bool, order_variant: str,
     try:
         if buf.read_bytes(4) != b'FBIN':
             return None
+        version_ints = []
         for _ in range(max(0, num_versions)):
-            buf.read_int()
+            version_ints.append(buf.read_int())
 
         if has_transform:
             saved = buf.tell()
@@ -136,8 +143,24 @@ def _parse_impl(data: bytes, *, has_transform: bool, order_variant: str,
                           action.get('mc_idx', -1), len(movie_clips))
                 return None
 
-        log.info("[%s] Parsed %d images, %d clips, %d actions.",
-                 tag, len(images), len(movie_clips), len(actions))
+        # Build a human-readable version tag from the encoded ints.  Most files
+        # store [1, 0] (or just [1] under num_versions=1) — we expose this so
+        # the summary can print "FBIN v1.0" / "FBIN v1".
+        if version_ints:
+            version_tag = "v" + ".".join(str(v) for v in version_ints)
+        else:
+            version_tag = "v?"
+        LAST_INFO.update({
+            "format":        "FBIN",
+            "version_ints":  tuple(version_ints),
+            "version_tag":   version_tag,
+            "has_transform": has_transform,
+            "order":         order_variant,
+            "num_versions":  num_versions,
+            "variant_tag":   tag,
+        })
+        log.debug("[%s] Parsed %d images, %d clips, %d actions.",
+                  tag, len(images), len(movie_clips), len(actions))
         return images, movie_clips, actions
 
     except (BufferError, struct.error, Exception) as exc:

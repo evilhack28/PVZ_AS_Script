@@ -54,7 +54,7 @@ def load_pvr_texture(pvr_path: str):
         return None
 
     fmt = _detect_format(data)
-    log.info("PVR '%s': detected format '%s'", pvr_path, fmt)
+    log.debug("PVR '%s': detected format '%s'", pvr_path, fmt)
 
     if fmt == 'dreamcast':
         return _load_dreamcast(data, pvr_path, pygame)
@@ -195,7 +195,7 @@ def _load_dreamcast(data: bytes, pvr_path: str, pygame):
         w, h    = pil_img.size
         raw     = pil_img.tobytes()
         surface = pygame.image.fromstring(raw, (w, h), 'RGBA')
-        log.info("Dreamcast PVR loaded via pypvr: %dx%d  mode=%s", w, h, pil_img.mode)
+        log.debug("Dreamcast PVR loaded via pypvr: %dx%d  mode=%s", w, h, pil_img.mode)
         return surface
 
     except Exception as exc:
@@ -219,8 +219,8 @@ def _load_ios_v2(data: bytes, pvr_path: str, pygame):
     bpp        = struct.unpack_from('<I', data, 24)[0]
     pixel_type = flags & 0xFF
 
-    log.info("PVR v2: %dx%d  bpp=%d  pixel_type=0x%02X  data_len=%d",
-             width, height, bpp, pixel_type, data_len)
+    log.debug("PVR v2: %dx%d  bpp=%d  pixel_type=0x%02X  data_len=%d",
+              width, height, bpp, pixel_type, data_len)
 
     pixel_data = data[header_len: header_len + data_len]
 
@@ -238,7 +238,7 @@ def _load_ios_v2(data: bytes, pvr_path: str, pygame):
         rgba = _decode_rgba4444(pixel_data, width, height)
 
     surface = pygame.image.fromstring(rgba, (width, height), 'RGBA')
-    log.info("PVR v2 texture loaded: %dx%d  pixel_type=0x%02X", width, height, pixel_type)
+    log.debug("PVR v2 texture loaded: %dx%d  pixel_type=0x%02X", width, height, pixel_type)
     return surface
 
 

@@ -20,6 +20,10 @@ MAX_FRAMES      = 8000
 MAX_ELEMENTS    = 4096
 _ELEM_SIZE      = 38
 
+# Populated by the successful parse path so callers (e.g. scripts/main.py) can
+# show the detected variant in their summary.  Reset on each parse call.
+LAST_INFO: dict = {}
+
 
 def parse_rawbin(bin_path: str):
     """Parse a RawBin file from disk. Returns (images, mcs, actions, True)."""
@@ -59,12 +63,14 @@ def _probe(data: bytes, off: int) -> bool:
 
 
 def _parse_impl(data: bytes):
+    LAST_INFO.clear()
     if _probe(data, 0):
         offset = 0
     elif _probe(data, 12):
         offset = 12
     else:
         raise ValueError('Cannot locate image table — unrecognised RawBin layout')
+    start_offset = offset
 
     # Images: pascal_string + 8×float32
     # Layout: offset_x, offset_y, width, height, tex_x, tex_y, origin_x, origin_y
@@ -80,14 +86,11 @@ def _parse_impl(data: bytes):
         vals   = struct.unpack_from('<8f', data, offset); offset += 32
         off_x, off_y = vals[0], vals[1]
         w,     h     = vals[2], vals[3]
-        # RawBin element matrices already carry the world position (tx, ty).
-        # The image-record offset_x/offset_y is an internal anchor within the
-        # sprite, NOT a Flash registration point.  Values that exceed the sprite
-        # dimensions are artefacts of the export tool and must be clamped to 0
-        # so the sprite is placed at the element's world position.
-        # (FBIN keeps registration points unclamped — see fbin_parser.py.)
-        if w > 0 and abs(off_x) >= w: off_x = 0.0
-        if h > 0 and abs(off_y) >= h: off_y = 0.0
+        # offset_x/offset_y are Flash registration points (same as FBIN); they
+        # can legitimately exceed sprite dimensions (e.g. body parts pivoted at
+        # a joint far from the sprite bounds). A re-export of the same
+        # character as FBIN (v33 of zombie_JourneyWest_tieguo) confirms the
+        # raw values match the FBIN registration points byte-for-byte.
         log.debug("RawBin image '%s': tex=(%g,%g) size=(%g×%g) offset=(%g,%g)",
                   name, vals[4], vals[5], w, h, off_x, off_y)
         images.append({
@@ -129,14 +132,21 @@ def _parse_impl(data: bytes):
             if abs(end_offset - len(data)) < 16:
                 parsed = clips
                 offset = end_offset
-                log.info('RawBin clip header size: %d bytes', hdr_size)
+                log.debug('RawBin clip header size: %d bytes', hdr_size)
                 break
 
     if parsed is None:
         raise ValueError('Could not determine RawBin clip header size')
 
-    log.info('RawBin: %d images, %d clips, %d actions (consumed %d/%d bytes)',
-             len(images), len(parsed), len(actions), offset, len(data))
+    LAST_INFO.update({
+        "format":            "RawBin",
+        "clip_header_size":  hdr_size,
+        "start_offset":      start_offset,
+        "consumed":          offset,
+        "total":             len(data),
+    })
+    log.debug('RawBin: %d images, %d clips, %d actions (consumed %d/%d bytes)',
+              len(images), len(parsed), len(actions), offset, len(data))
     return images, parsed, actions, True
 
 
