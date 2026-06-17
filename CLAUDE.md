@@ -30,14 +30,20 @@ Imports stay flat (`from fbin_parser import parse_binary`); `main.py` reaches in
 ## Commands
 
 ```bash
-# Interactive — file pickers appear for the .bin and .pvr
+# Interactive — file pickers appear for both
 python main.py
 
-# Scripted
+# Scripted — both files explicit
 python main.py --bin samples/char.bin --pvr samples/char.pvr
+
+# Half-explicit — sibling is auto-paired by matching stem in the same folder
+python main.py --bin samples/char.bin     # finds char.pvr next to it
+python main.py --pvr samples/char.pvr     # finds char.bin next to it
 ```
 
-If either flag is omitted, `main._resolve_inputs` opens a tkinter file dialog (anchored at `samples/`) to pick the missing one. Falls back to `input()` if tkinter is unavailable.
+Resolution order in `main._resolve_inputs`:
+1. If the user passed exactly one of `--bin` / `--pvr`, look for a same-stem sibling next to it.
+2. For anything still missing, open a tkinter file dialog (anchored at `samples/`). Falls back to `input()` if tkinter is unavailable.
 
 Importable API (no CLI):
 ```python

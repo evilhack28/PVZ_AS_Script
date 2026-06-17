@@ -4,8 +4,14 @@ main.py
 Single entry point for the project. Launches the animation player on a
 (.bin, .pvr) pair.
 
-    python main.py                                                # interactive — pops up file pickers
-    python main.py --bin path/to/char.bin --pvr path/to/char.pvr  # scripted
+    python main.py                              # interactive — pops up file pickers
+    python main.py --bin char.bin --pvr char.pvr   # scripted, both files explicit
+    python main.py --bin char.bin               # auto-pairs char.pvr from the same folder
+    python main.py --pvr char.pvr               # auto-pairs char.bin from the same folder
+
+When only one flag is given, the other is found by looking for a file with
+the same stem and the matching extension next to it. If the sibling is
+missing, a file picker opens for it.
 
 The parser (`parsers/fbin_parser.parse_binary`) and the PVR decoder
 (`pvr/pvr_loader.load_pvr_texture` / `convert_pvr_to_png`) are still
@@ -49,9 +55,26 @@ def _pick_file(title: str, filetypes: list, start_dir: str) -> str | None:
     return path or None
 
 
+def _sibling_with_suffix(path_str: str, suffix: str) -> str | None:
+    """If `path_str` exists, look for a file with the same stem and the given
+    suffix in the same folder. Returns its path string or None.
+
+        _sibling_with_suffix("…/1111111.bin", ".pvr") -> "…/1111111.pvr"
+    """
+    if not path_str:
+        return None
+    p = Path(path_str)
+    if not p.exists():
+        return None
+    sibling = p.with_suffix(suffix)
+    return str(sibling) if sibling.exists() else None
+
+
 def _resolve_inputs(args: argparse.Namespace) -> tuple[Path, Path]:
-    """Return (bin_path, pvr_path), prompting interactively for whichever
-    one wasn't passed on the CLI."""
+    """Return (bin_path, pvr_path). For each missing CLI flag:
+       1. try to find a same-stem sibling next to the file that WAS provided;
+       2. otherwise fall back to a tkinter file picker.
+    """
     start_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                              "samples")
     if not os.path.isdir(start_dir):
@@ -59,6 +82,18 @@ def _resolve_inputs(args: argparse.Namespace) -> tuple[Path, Path]:
 
     bin_str = args.bin
     pvr_str = args.pvr
+
+    # Auto-pair by stem when only one flag is supplied.
+    if bin_str and not pvr_str:
+        guess = _sibling_with_suffix(bin_str, ".pvr")
+        if guess:
+            print(f"Auto-paired .pvr: {guess}")
+            pvr_str = guess
+    elif pvr_str and not bin_str:
+        guess = _sibling_with_suffix(pvr_str, ".bin")
+        if guess:
+            print(f"Auto-paired .bin: {guess}")
+            bin_str = guess
 
     if not bin_str:
         bin_str = _pick_file("Select .bin animation file",
@@ -119,12 +154,17 @@ def run_player(bin_path: Path, pvr_path: Path) -> None:
 def main() -> None:
     p = argparse.ArgumentParser(
         description="Launch the animation player on a .bin + .pvr pair. "
-                    "Omit either flag to be prompted with a file picker.")
+                    "Pass only one flag and the other is auto-paired by "
+                    "matching the stem (foo.bin <-> foo.pvr) in the same "
+                    "folder. Pass neither and a file picker opens for both.")
     p.add_argument("--bin", metavar="PATH",
                    help="Path to .bin animation file (FBIN or RawBin). "
-                        "If omitted, a file picker opens.")
+                        "If omitted, the sibling .pvr's stem is used to "
+                        "find it, otherwise a file picker opens.")
     p.add_argument("--pvr", metavar="PATH",
-                   help="Path to .pvr texture file. If omitted, a file picker opens.")
+                   help="Path to .pvr texture file. If omitted, the sibling "
+                        ".bin's stem is used to find it, otherwise a file "
+                        "picker opens.")
     args = p.parse_args()
 
     bin_path, pvr_path = _resolve_inputs(args)

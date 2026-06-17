@@ -34,14 +34,18 @@ pip install pygame numpy Pillow
 ## Run
 
 ```bash
-# Interactive — pops up file pickers for the .bin and the .pvr
+# Interactive — pops up file pickers for both
 python main.py
 
-# Scripted
+# Both files explicit
 python main.py --bin samples/zombie_kungfu_torch.bin --pvr samples/zombie_kungfu_torch.pvr
+
+# Half-explicit — the sibling is auto-paired by matching stem in the same folder
+python main.py --bin samples/zombie_kungfu_torch.bin     # finds zombie_kungfu_torch.pvr
+python main.py --pvr samples/zombie_kungfu_torch.pvr     # finds zombie_kungfu_torch.bin
 ```
 
-If you omit `--bin` or `--pvr`, a tkinter file dialog opens (anchored at `samples/`) so you can click the files.
+If only one of `--bin` / `--pvr` is given, the script looks next to that file for a sibling with the same stem and the matching extension. If the sibling is missing (or both flags are omitted), a tkinter file dialog opens for whatever is still unresolved.
 
 ---
 
