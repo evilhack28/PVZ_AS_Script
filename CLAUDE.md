@@ -94,7 +94,7 @@ actions     — list of dicts: {name, start, end, mc_idx, p4}
 `Renderer.draw()` walks the MC tree recursively (max depth 32). At each node it concatenates the local affine matrix with the parent's. At leaf image nodes it calls `_draw_image()`.
 
 Key behaviours that span multiple files:
-- **FBIN dedup**: stale keyframe placements — same image id appears **exactly twice** per frame (old keyframe + new). Only the last of the two is kept. Three or more copies = intentional multi-instance (e.g. vine thorns) — keep all.
+- **FBIN dedup**: position-aware — same `(image id, round(tx,1), round(ty,1))` collapses to last wins (Flash stale keyframe placements at the *same* spot). Same image id at *different* positions is kept (legitimate symmetrical pairs: left/right pupils, paired eye dots on bellis/Breeder_zombie/bush). Earlier count-only rule killed one eye on every such pair.
 - **RawBin dedup**: suppress identical `(frame_index, tx, ty)` triples per frame.
 - **RawBin plane suppression**: images drawn via `mc_id=0` (ground_swatch_plane) suppress `mc_id=1` draws of the same image.
 - **RawBin element dispatch** — `mc_id` (eid) determines how `frame_index` (fi) is interpreted:
@@ -136,6 +136,7 @@ FPS resolution priority (`_resolve_fps`), per `fps_mode`:
 | 1 / 2 | Set fps mode: source / custom |
 | 4 | Enter custom fps value |
 | K | Toggle "butter" sprite hide (kungfu zombies' head accessory) |
+| C | Cycle costume mode (ALL → NONE → 1 → 2 → …) for plants with unreferenced `custom_NN_*` swap variants |
 | G | Export current action to GIF |
 | A | Export all actions as GIFs |
 | Z | Export all actions as no-background GIFs |

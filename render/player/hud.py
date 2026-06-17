@@ -66,6 +66,7 @@ _HELP_SECTIONS = [
     ]),
     ("Filters", [
         ("K",              "Toggle 'butter' (kungfu head sprite)"),
+        ("C",              "Cycle costume (all / none / 1 / 2 …)"),
     ]),
     ("Export", [
         ("G / A / Z",      "GIF (current / all / all no-bg)"),
@@ -187,6 +188,16 @@ class HudMixin:
         if getattr(self, "hide_butter", False):
             r = _draw_icon_pill(self.screen, self.font, "BUTTER OFF",
                                 (pill_x, pill_y), _PAL["good"])
+            pill_x = r.right + gap
+
+        # Show a costume pill whenever the model HAS costume MCs, so the user
+        # sees the feature exists. Default 'ALL' is dim; any other mode is
+        # highlighted to make the active filter obvious.
+        if getattr(self, "costume_all_mcs", set()):
+            label    = f"CO {self._costume_mode_label()}"
+            col      = _PAL["pill_dim"] if self.costume_mode == 'all' else _PAL["good"]
+            r = _draw_icon_pill(self.screen, self.font, label,
+                                (pill_x, pill_y), col)
             pill_x = r.right + gap
 
         # Second row: format badge + render fps (small, dim)

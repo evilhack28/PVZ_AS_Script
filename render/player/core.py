@@ -5,6 +5,7 @@ Player core: PlayerConfig, _PlayerCore (run loop, base transform, meta resolutio
 import logging
 import math
 import os
+import re
 from dataclasses import dataclass
 from typing import Optional, List
 
@@ -12,6 +13,13 @@ import pygame
 
 from renderer import Renderer, BoundingBox
 from fbin_parser import DEFAULT_FRAME_RATE
+
+# Plant/zombie costume MCs follow a `_custom*` / `custom_NN*` naming convention
+# (e.g. `_custom_left`, `custom_01_left`, `wuxh_wdss_custom_03`). `_CUSTOM_PAT`
+# detects any costume MC; `_VARIANT_PAT` pulls out the trailing variant number
+# from numbered ones — when the number is absent the MC is the "base" slot.
+_CUSTOM_PAT  = re.compile(r'custom', re.IGNORECASE)
+_VARIANT_PAT = re.compile(r'custom[_\W]?(\d+)', re.IGNORECASE)
 
 log = logging.getLogger(__name__)
 
@@ -80,6 +88,11 @@ class _PlayerCore:
         # whose butter sprite covers the head.
         self.hide_butter = False
 
+        # Costume picker state. C key cycles through self.costume_cycle which
+        # is built from MC names containing 'custom' at startup. _apply_costume()
+        # pushes the resulting hidden-MC set to the renderer.
+        self._init_costumes()
+
         # Temporary status message shown after GIF export
         self._gif_msg      = ""
         self._gif_msg_ttl  = 0
@@ -112,6 +125,142 @@ class _PlayerCore:
         self._pan_origin = None   # (mouse_x, mouse_y, pan_x_start, pan_y_start) | None
         # Left-button scrub-drag state (True while held inside the scrub bar)
         self._scrub_dragging = False
+
+    # ── Costume picker ────────────────────────────────────────────────────────
+
+    def _init_costumes(self) -> None:
+        """Build costume swap slots from MC names + action-tree references.
+
+        A "slot" is a group of MCs sharing the same name stem around `custom`
+        (e.g. `_custom_left` and `custom_01_left` both share stem `left`).
+        A numbered MC (`custom_NN_*`) only counts as a real costume variant
+        when it's never referenced from any action MC's frames — those are
+        the alternates the game swaps in at runtime. MCs whose names happen
+        to contain "custom" but are actively drawn (chizhenhua's `custom_01`
+        and `custom_02`, which dispatch the entire body) are ignored.
+
+        The slot's base — the MC variant N replaces — is the referenced
+        unnumbered sibling if one exists (CherryBomb `_custom_left` →
+        `custom_01_left`); otherwise the unnumbered slot member (peashooter
+        `wuxh_wdss__custom`) which may itself be unreferenced (the picker
+        becomes a no-op in that case but the cycle still surfaces).
+        """
+        ref_counts = self._action_mc_ref_counts()
+
+        # bucket by stem -> list of (variant_key, mc_idx)
+        by_stem: dict = {}
+        for i, mc in enumerate(self.movie_clips):
+            name = mc.get('name', '')
+            if not _CUSTOM_PAT.search(name):
+                continue
+            stem  = self._costume_stem(name)
+            m     = _VARIANT_PAT.search(name)
+            var   = int(m.group(1)) if m else 'base'
+            by_stem.setdefault(stem, []).append((var, i))
+
+        slots: list = []
+        for stem, members in by_stem.items():
+            numbered  = [(v, idx) for v, idx in members if isinstance(v, int)]
+            base_mem  = [idx for v, idx in members if v == 'base']
+            # Filter out numbered variants that are actively drawn — they're
+            # body parts misnamed as "custom", not swap targets.
+            numbered  = [(v, idx) for v, idx in numbered
+                         if ref_counts.get(idx, 0) == 0]
+            if not numbered:
+                continue
+            # Prefer a referenced unnumbered MC as the base (the active body
+            # part the variant replaces). Fall back to any unnumbered, else
+            # the lowest-numbered variant.
+            base_mc = next((idx for idx in base_mem if ref_counts.get(idx, 0) > 0), None)
+            if base_mc is None and base_mem:
+                base_mc = base_mem[0]
+            if base_mc is None:
+                base_mc = min(numbered, key=lambda vi: vi[0])[1]
+            slots.append({
+                'stem':     stem,
+                'base_mc':  base_mc,
+                'variants': {v: idx for v, idx in numbered},
+            })
+
+        self.costume_slots: list = slots
+        all_variants: set = set()
+        for s in slots:
+            all_variants.update(s['variants'].keys())
+
+        cycle: list = ['all']
+        if slots:
+            cycle.append('none')
+            cycle.extend(sorted(all_variants))
+        self.costume_cycle: list = cycle
+        self.costume_mode_idx: int = 0
+        self.costume_mode = cycle[0]
+        self._apply_costume()
+
+    def _action_mc_ref_counts(self) -> dict:
+        """Count direct MC-element references inside each action MC's frame
+        tree. Used to tell active body parts from inert swap targets."""
+        roots = {a['mc_idx'] for a in self.playlist
+                 if 0 <= a.get('mc_idx', -1) < len(self.movie_clips)}
+        counts: dict = {}
+        for ai in roots:
+            for frame in self.movie_clips[ai]['frames']:
+                for e in frame:
+                    if e['is_mc']:
+                        counts[e['id']] = counts.get(e['id'], 0) + 1
+        return counts
+
+    @staticmethod
+    def _costume_stem(name: str) -> str:
+        """Strip the `custom` marker (and its variant number) from a costume
+        MC name to derive the shared slot key. `_custom_left` and
+        `custom_01_left` both reduce to `left`; `wuxh_wdss__custom` and
+        `wuxh_wdss_custom_03` both reduce to `wuxh_wdss`."""
+        n   = name.lower()
+        idx = n.find('custom')
+        if idx < 0:
+            return ''
+        prefix = n[:idx].rstrip('_')
+        rest   = n[idx + 6:]                       # past 'custom'
+        rest   = re.sub(r'^[_]?\d+', '', rest)     # drop _NN
+        rest   = rest.lstrip('_')
+        if prefix and rest:
+            return prefix + '_' + rest
+        return prefix or rest
+
+    def _apply_costume(self) -> None:
+        """Resolve self.costume_mode to a renderer mc_remap dict."""
+        mode  = self.costume_mode
+        remap: dict = {}
+        if mode == 'all' or not self.costume_slots:
+            pass
+        elif mode == 'none':
+            for s in self.costume_slots:
+                remap[s['base_mc']] = None
+        else:
+            for s in self.costume_slots:
+                tgt = s['variants'].get(mode)
+                # Slot has this variant → swap base for it. Slot lacks the
+                # variant → drop the base so mixing characters with different
+                # variant numbers (CherryBomb#1 + chizhenhua-style) stays sane.
+                remap[s['base_mc']] = tgt if tgt is not None else None
+        self.renderer.mc_remap = dict(remap)
+
+    @property
+    def costume_all_mcs(self) -> set:
+        """Set of every MC index touched by the costume picker (HUD uses this
+        to know whether to show the pill)."""
+        out: set = set()
+        for s in getattr(self, 'costume_slots', []):
+            out.add(s['base_mc'])
+            out.update(s['variants'].values())
+        return out
+
+    def _costume_mode_label(self) -> str:
+        """Human-readable label for the current costume mode (HUD/messages)."""
+        m = self.costume_mode
+        if m == 'all':  return "ALL"
+        if m == 'none': return "NONE"
+        return f"#{m}"
 
     def _base_transform(self, screen_w: int, screen_h: int) -> tuple:
         """

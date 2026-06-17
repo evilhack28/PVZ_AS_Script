@@ -186,6 +186,18 @@ class InputMixin:
                                           if self.hide_butter else frozenset())
             self._gif_msg = f"Butter: {'HIDDEN' if self.hide_butter else 'SHOWN'}"
             self._gif_msg_ttl = 120
+        elif key == pygame.K_c:
+            # Cycle costume modes: ALL -> NONE -> 1 -> 2 -> ... -> ALL.
+            # Cycle only has 'all' when the model has no costume swap slots.
+            if len(self.costume_cycle) <= 1:
+                self._gif_msg = "No costumes on this model"
+                self._gif_msg_ttl = 120
+            else:
+                self.costume_mode_idx = (self.costume_mode_idx + 1) % len(self.costume_cycle)
+                self.costume_mode     = self.costume_cycle[self.costume_mode_idx]
+                self._apply_costume()
+                self._gif_msg = f"Costume: {self._costume_mode_label()}"
+                self._gif_msg_ttl = 120
         elif key == pygame.K_1:
             self.fps_mode = 'source'
             self._gif_msg = "FPS mode: SOURCE";  self._gif_msg_ttl = 120

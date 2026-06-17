@@ -62,6 +62,12 @@ class Renderer:
         # Lowercased substrings; any image whose name contains one of these
         # is skipped during draw. Set by Player (e.g. K-key toggles {'butter'}).
         self.hidden_parts: frozenset = frozenset()
+        # MC id remap applied at element walk: `{src_mc_id: dst_mc_id_or_None}`.
+        # `dst=None` skips the subtree (e.g. costume NONE); `dst=other_idx`
+        # renders that MC in place of the source — used by the C-key costume
+        # picker to swap a base body part for a numbered `custom_NN_*` variant
+        # while preserving the original placement transform from the parent.
+        self.mc_remap: dict = {}
 
     # ── Public draw call ──────────────────────────────────────────────────────
 
@@ -179,30 +185,24 @@ class Renderer:
             elements = [e for i, e in enumerate(elements) if i in keep]
 
         # ── FBIN image display-list deduplication ─────────────────────────────
-        # In FBIN, Flash sometimes exports stale keyframe placements: the same
-        # image element (is_mc=False) appears exactly TWICE per frame — the
-        # earlier one is the old keyframe state, the later one is correct.
-        # Only dedup when count == 2 (last wins). Three or more copies of the
-        # same image id are intentional multi-instance placement (e.g. repeated
-        # vine thorns/nodes) and must all be rendered.
+        # Flash sometimes exports stale keyframe placements: the same image
+        # appears twice at the *same* spot — older keyframe + new one. Drop
+        # those (last wins). But the same image at *different* positions is
+        # a legitimate symmetrical placement (left/right pupils, paired dots,
+        # eyebrows) and MUST be kept — a previous count-based rule killed
+        # one eye on bellis/Breeder_zombie/bush. Same position-aware key as
+        # the RawBin branch above.
         else:
-            img_id_counts: dict = {}
-            for elem in elements:
-                if not elem['is_mc']:
-                    eid = elem['id']
-                    img_id_counts[eid] = img_id_counts.get(eid, 0) + 1
-            dedup_ids = {eid for eid, cnt in img_id_counts.items() if cnt == 2}
-            if dedup_ids:
-                last_pos: dict = {}
-                for i, elem in enumerate(elements):
-                    if not elem['is_mc'] and elem['id'] in dedup_ids:
-                        last_pos[elem['id']] = i
-                elements = [
-                    elem for i, elem in enumerate(elements)
-                    if elem['is_mc']
-                    or elem['id'] not in dedup_ids
-                    or i == last_pos[elem['id']]
-                ]
+            last_idx: dict = {}
+            for i, elem in enumerate(elements):
+                if elem['is_mc']:
+                    continue
+                m   = elem['matrix']
+                key = (elem['id'], round(m[4], 1), round(m[5], 1))
+                last_idx[key] = i
+            keep     = set(last_idx.values())
+            elements = [e for i, e in enumerate(elements)
+                        if e['is_mc'] or i in keep]
 
         for elem in elements:
             eid = elem['id']
@@ -221,6 +221,18 @@ class Renderer:
                 child_frame = elem.get('frame_index', -1)
                 if eid >= len(self.movie_clips):
                     continue
+
+                # Costume remap: swap a base body-part MC for its variant
+                # (or skip entirely when mapped to None). Applied BEFORE the
+                # subtree is fetched so we honour both swap and hide modes
+                # without changing the parent's transform.
+                if eid in self.mc_remap:
+                    new_eid = self.mc_remap[eid]
+                    if new_eid is None:
+                        continue
+                    eid = new_eid
+                    if eid >= len(self.movie_clips):
+                        continue
                 child_mc = self.movie_clips[eid]
 
                 # Hidden-parts filter for MC subtrees (e.g. the 'butter' MC on
