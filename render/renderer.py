@@ -235,22 +235,30 @@ class Renderer:
                         continue
                 child_mc = self.movie_clips[eid]
 
-                # Hidden-parts filter for MC subtrees (e.g. the 'butter' MC on
-                # kungfu zombies). Skip the whole subtree, not just leaf images.
-                # For RawBin redirects (eid=1, frame_index=target_mc), the visible
-                # name lives on the target MC, not the redirect wrapper — check
-                # both so hide-by-name catches butter referenced via redirect
-                # (e.g. zombie_80s_basic_flag's MC[37] butter routed through eid=1).
+                # Hidden-parts filter — match against the name of whatever the
+                # element actually renders, NOT blindly MC[eid].name. RawBin
+                # reuses `eid` as a dispatch code (eid=0 → ground/image-direct,
+                # eid=1 → redirect to MC[child_frame], eid≠1 with child_frame
+                # in image range → image-direct), so MC[eid] is often unrelated
+                # to what's drawn. Example: zombie_greatwall_gun.bin has MC[0]
+                # named 'butter' — the old check hid every eid=0 body part.
                 if self.hidden_parts:
-                    mc_name_lower = str(child_mc.get('name', '')).lower()
-                    if any(p in mc_name_lower for p in self.hidden_parts):
+                    tgt_name = None
+                    if self.rawbin:
+                        if eid == 1 and 0 <= child_frame < len(self.movie_clips):
+                            tgt_name = self.movie_clips[child_frame].get('name', '')
+                        elif 0 <= child_frame < len(self.images):
+                            tgt_name = self.images[child_frame].get('name', '')
+                        elif (len(child_mc['frames']) == 1
+                                and 0 <= child_frame < len(self.movie_clips)):
+                            tgt_name = self.movie_clips[child_frame].get('name', '')
+                        else:
+                            tgt_name = child_mc.get('name', '')
+                    else:
+                        tgt_name = child_mc.get('name', '')
+                    tgt_lower = str(tgt_name).lower()
+                    if any(p in tgt_lower for p in self.hidden_parts):
                         continue
-                    if (self.rawbin and eid == 1
-                            and 0 <= child_frame < len(self.movie_clips)):
-                        tgt_name = str(self.movie_clips[child_frame]
-                                       .get('name', '')).lower()
-                        if any(p in tgt_name for p in self.hidden_parts):
-                            continue
 
                 if self.rawbin:
                     if eid == 1 and child_frame >= 0:
