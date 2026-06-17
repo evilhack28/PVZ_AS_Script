@@ -25,7 +25,6 @@ log = logging.getLogger(__name__)
 _FMT_RGBA4444 = {0x10, 0x0C}
 _FMT_RGBA8888 = {0x12, 0x0D}
 _FMT_PVRTC4   = {0x19, 0x18}
-_FMT_PVRTC2   = {0x17, 0x16}
 _CH_SCALE     = 17   # 4-bit → 8-bit channel scale factor
 
 
@@ -66,88 +65,36 @@ def load_pvr_texture(pvr_path: str):
     return None
 
 
-def probe_pvr(pvr_path: str) -> dict:
-    """
-    Read the PVR header without decoding and return a metadata dict:
-
-        {
-          'container': 'ios_v2' | 'dreamcast' | 'unknown',
-          'width':      int,
-          'height':     int,
-          'bpp':        int,
-          'pixel_type': int,          # raw pixel-type code (ios_v2 only)
-          'format_name': str,         # human-readable pixel format
-          'data_len':   int,
-          'file_size':  int,
-        }
-
-    Returns a minimal dict with container='unknown' on any error.
-    """
-    _PT_NAMES = {
-        0x0C: 'RGBA4444', 0x10: 'RGBA4444',
-        0x0D: 'RGBA8888', 0x12: 'RGBA8888',
-        0x18: 'PVRTC4',   0x19: 'PVRTC4',
-        0x16: 'PVRTC2',   0x17: 'PVRTC2',
-    }
+def convert_pvr_to_png(input_pvr_path) -> bool:
+    """Decode a PVR via `load_pvr_texture()` and write a PNG next to the
+    source (foo.pvr -> foo.png). Returns True on success."""
+    from pathlib import Path
     try:
-        with open(pvr_path, 'rb') as fh:
-            data = fh.read()
-    except OSError:
-        return {'container': 'unknown', 'width': 0, 'height': 0,
-                'bpp': 0, 'pixel_type': 0, 'format_name': 'unknown',
-                'data_len': 0, 'file_size': 0}
+        import pygame
+    except ImportError:
+        print("Error: pygame is required.  Run:  pip install pygame")
+        return False
 
-    container = _detect_format(data)
-    file_size = len(data)
+    input_path  = Path(input_pvr_path).resolve()
+    output_path = input_path.with_suffix(".png")
 
-    if container == 'ios_v2' and len(data) >= 52:
-        height     = struct.unpack_from('<I', data,  4)[0]
-        width      = struct.unpack_from('<I', data,  8)[0]
-        flags      = struct.unpack_from('<I', data, 16)[0]
-        data_len   = struct.unpack_from('<I', data, 20)[0]
-        bpp        = struct.unpack_from('<I', data, 24)[0]
-        pixel_type = flags & 0xFF
-        return {
-            'container':   'ios_v2',
-            'width':       width,
-            'height':      height,
-            'bpp':         bpp,
-            'pixel_type':  pixel_type,
-            'format_name': _PT_NAMES.get(pixel_type, f'0x{pixel_type:02X}'),
-            'data_len':    data_len,
-            'file_size':   file_size,
-        }
+    pygame.init()
+    try:
+        pygame.display.set_mode((1, 1), pygame.NOFRAME)
+    except pygame.error:
+        pass
 
-    if container == 'dreamcast':
-        # Best-effort: look for PVRT block and read its header
-        off = data.find(b'PVRT')
-        if off >= 0 and off + 12 <= len(data):
-            data_len   = struct.unpack_from('<I', data, off + 4)[0]
-            pixel_fmt  = data[off + 8] if off + 8 < len(data) else 0
-            pixel_type = data[off + 9] if off + 9 < len(data) else 0
-            width  = struct.unpack_from('<H', data, off + 12)[0] if off + 14 <= len(data) else 0
-            height = struct.unpack_from('<H', data, off + 14)[0] if off + 16 <= len(data) else 0
-            dc_fmts = {0x00:'ARGB1555',0x01:'RGB565',0x02:'ARGB4444',
-                       0x03:'YUV422',0x04:'BUMP',0x05:'RGB555',0x06:'ARGB8888'}
-            dc_types = {0x01:'Square twiddled',0x02:'Square twiddled + mips',
-                        0x03:'VQ',0x04:'VQ + mips',0x09:'Non-square twiddled',
-                        0x0B:'YUV420',0x0D:'Bitmap'}
-            fmt_name = f"{dc_fmts.get(pixel_fmt,'fmt?')} {dc_types.get(pixel_type,'type?')}"
-            bpp_map = {0x00:16,0x01:16,0x02:16,0x03:16,0x06:32}
-            return {
-                'container':   'dreamcast',
-                'width':       width,
-                'height':      height,
-                'bpp':         bpp_map.get(pixel_fmt, 0),
-                'pixel_type':  pixel_type,
-                'format_name': fmt_name,
-                'data_len':    data_len,
-                'file_size':   file_size,
-            }
+    surface = load_pvr_texture(str(input_path))
+    if surface is None:
+        print(f"PVR conversion failed: could not decode '{input_path}'")
+        return False
 
-    return {'container': container, 'width': 0, 'height': 0,
-            'bpp': 0, 'pixel_type': 0, 'format_name': 'unknown',
-            'data_len': 0, 'file_size': 0}
+    try:
+        pygame.image.save(surface, str(output_path))
+        return True
+    except Exception as exc:
+        print(f"PVR conversion failed: {exc}")
+        return False
 
 
 # ── Format detection ──────────────────────────────────────────────────────────
@@ -230,8 +177,6 @@ def _load_ios_v2(data: bytes, pvr_path: str, pygame):
         rgba = _decode_rgba8888(pixel_data, width, height)
     elif pixel_type in _FMT_PVRTC4:
         rgba = _decode_pvrtc4(pixel_data, width, height)
-    elif pixel_type in _FMT_PVRTC2:
-        rgba = _decode_pvrtc2(pixel_data, width, height)
     else:
         log.warning("Unsupported PVR v2 pixel_type 0x%02X in '%s' – trying RGBA4444 fallback.",
                     pixel_type, pvr_path)
@@ -577,86 +522,3 @@ def _pvrtc4_pure(data, width, height, blocks_x, blocks_y):
     return bytes(out)
 
 
-# ── PVRTC-I 2bpp ─────────────────────────────────────────────────────────────
-#
-# TODO: the PVRTC2 path below still uses the *original* (incorrect) layout
-# assumptions — linear block order, 14-bit colors for both A and B, and the
-# (bx, bx+1) bilinear. The same five fixes applied to PVRTC4 above (Morton
-# block order, asymmetric color word split, opacity-aware color decode,
-# quadrant-aware bilinear, punch-through alpha) need to be ported here.
-# Not done yet because no PVRTC2 sample is in the repo to validate against.
-
-def _decode_pvrtc2(data: bytes, width: int, height: int) -> bytes:
-    bx = max(2, (width  + 7) >> 3)
-    by = max(2, (height + 3) >> 2)
-    needed = bx * by * 8
-    if len(data) < needed:
-        data = data + bytes(needed - len(data))
-    try:
-        import numpy as np
-        return _pvrtc2_numpy(data, width, height, bx, by)
-    except ImportError:
-        return _pvrtc2_pure(data, width, height, bx, by)
-
-
-def _pvrtc2_numpy(data, width, height, blocks_x, blocks_y):
-    import numpy as np
-    blks  = np.frombuffer(data[:blocks_x*blocks_y*8], dtype='<u4').reshape(-1, 2)
-    mod_g = blks[:, 0].reshape(blocks_y, blocks_x)
-    col_g = blks[:, 1].reshape(blocks_y, blocks_x)
-    pt    = (col_g & 1).astype(bool)
-    rawA  = ((col_g >>  1) & 0x3FFF).astype(np.int32)
-    rawB  = ((col_g >> 15) & 0x3FFF).astype(np.int32)
-
-    def vec_dec(raw, pt_arr):
-        r4=(raw>>9)&0xF; g5=(raw>>4)&0x1F; b4=raw&0xF
-        r8=(r4<<4)|r4; g8=(g5<<3)|(g5>>2); b8=(b4<<4)|b4
-        op=((raw>>13)&1).astype(bool)
-        a8=np.where(op,np.int32(255),np.where(pt_arr,np.int32(0),np.int32(255)))
-        return np.stack([r8,g8,b8,a8],axis=-1)
-
-    ca=vec_dec(rawA,pt); cb=vec_dec(rawB,pt)
-    ca_r=np.roll(ca,-1,axis=1); ca_d=np.roll(ca,-1,axis=0)
-    ca_rd=np.roll(ca_d,-1,axis=1)
-    cb_r=np.roll(cb,-1,axis=1); cb_d=np.roll(cb,-1,axis=0)
-    cb_rd=np.roll(cb_d,-1,axis=1)
-
-    out = np.zeros((height, width, 4), dtype=np.uint8)
-    for py in range(4):
-        for px in range(8):
-            wx1=px+1; wx0=8-wx1; wy1=py+1; wy0=4-wy1
-            fa=(ca*wx0*wy0+ca_r*wx1*wy0+ca_d*wx0*wy1+ca_rd*wx1*wy1)>>5
-            fb=(cb*wx0*wy0+cb_r*wx1*wy0+cb_d*wx0*wy1+cb_rd*wx1*wy1)>>5
-            bit=py*8+px
-            mod=((mod_g>>bit)&1)[:,:,np.newaxis]
-            c=np.where(mod==0,fa,fb)
-            if px<width and py<height:
-                out[py::4, px::8]=np.clip(c,0,255).astype(np.uint8)[:blocks_y,:blocks_x]
-    return out.tobytes()
-
-
-def _pvrtc2_pure(data, width, height, blocks_x, blocks_y):
-    out = bytearray(width * height * 4)
-    def get(bx, by):
-        bx%=blocks_x; by%=blocks_y
-        off=(by*blocks_x+bx)*8
-        mw=struct.unpack_from('<I',data,off)[0]
-        cw=struct.unpack_from('<I',data,off+4)[0]
-        pt=bool(cw&1)
-        return _dec14((cw>>1)&0x3FFF,pt), _dec14((cw>>15)&0x3FFF,pt), mw
-    for by in range(blocks_y):
-        for bx in range(blocks_x):
-            a00,b00,m00=get(bx,by); a10,b10,_=get(bx+1,by)
-            a01,b01,_=get(bx,by+1); a11,b11,_=get(bx+1,by+1)
-            for py in range(4):
-                for px in range(8):
-                    wx1=px+1;wx0=8-wx1;wy1=py+1;wy0=4-wy1
-                    fa=_bilinear4(a00,a10,a01,a11,wx0,wx1,wy0,wy1)
-                    fb=_bilinear4(b00,b10,b01,b11,wx0,wx1,wy0,wy1)
-                    mod=(m00>>(py*8+px))&1
-                    c=fa if mod==0 else fb
-                    ox=bx*8+px; oy=by*4+py
-                    if ox<width and oy<height:
-                        p=(oy*width+ox)*4
-                        out[p]=c[0];out[p+1]=c[1];out[p+2]=c[2];out[p+3]=c[3]
-    return bytes(out)

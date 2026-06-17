@@ -179,19 +179,17 @@ class InputMixin:
             self.paused = True
         elif key == pygame.K_l:
             self.loop = not self.loop
-        elif key == pygame.K_r:
-            # Cycle fps mode: source -> meta -> custom -> source ...
-            modes = ['source', 'meta', 'custom']
-            self.fps_mode = modes[(modes.index(self.fps_mode) + 1) % len(modes)]
-            self._gif_msg = f"FPS mode: {self.fps_mode.upper()}"
+        elif key == pygame.K_k:
+            # Toggle hiding the 'butter' sprite (covers the kungfu zombies' face)
+            self.hide_butter = not self.hide_butter
+            self.renderer.hidden_parts = (frozenset({'butter'})
+                                          if self.hide_butter else frozenset())
+            self._gif_msg = f"Butter: {'HIDDEN' if self.hide_butter else 'SHOWN'}"
             self._gif_msg_ttl = 120
         elif key == pygame.K_1:
             self.fps_mode = 'source'
             self._gif_msg = "FPS mode: SOURCE";  self._gif_msg_ttl = 120
         elif key == pygame.K_2:
-            self.fps_mode = 'meta'
-            self._gif_msg = "FPS mode: META";    self._gif_msg_ttl = 120
-        elif key == pygame.K_3:
             self.fps_mode = 'custom'
             self._gif_msg = f"FPS mode: CUSTOM ({self.fps_custom})";  self._gif_msg_ttl = 120
         elif key == pygame.K_4:
@@ -209,14 +207,10 @@ class InputMixin:
             self._export_sprites_now()
         elif key == pygame.K_t:
             self._export_atlas_now()
-        elif key == pygame.K_x:
-            self._export_xfl_now()
         elif key == pygame.K_j:
             self._dump_frames_json()
         elif key == pygame.K_h:
             self.show_hud = not self.show_hud
-        elif key == pygame.K_m:
-            self._reload_meta()
         elif key == pygame.K_0:
             self._reset_view()
             self._gif_msg     = "View reset"

@@ -4,10 +4,10 @@ player
 Animation player built on top of Renderer.
 
 The Player class is composed from four mixins, one per concern:
-    _PlayerCore   – __init__, run loop, base transform, meta resolution
+    _PlayerCore   – __init__, run loop, base transform, fps resolution
     HudMixin      – HUD overlay + action picker drawing
     InputMixin    – keyboard / window event handling
-    ExportMixin   – GIF / sprite / atlas / JSON / XFL exports
+    ExportMixin   – GIF / sprite / atlas / JSON exports
 
 Controls
 ========
@@ -19,9 +19,10 @@ N / B       - step one frame forward / back (auto-pauses)
 F           - jump to frame
 L           - toggle loop
 I           - action picker
+K           - toggle 'butter' sprite (kungfu zombies' head accessory)
+1 / 2 / 4   - fps mode src / custom / enter custom value
 G / A / Z   - export current / all / all-no-bg GIFs
 S / T       - export sprites / atlas
-X           - export XFL / .fla
 J           - dump frames as JSON
 H           - toggle HUD
 """

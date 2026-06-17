@@ -2,6 +2,9 @@
 input_buffer.py
 ---------------
 Binary stream reader with bounds-checked primitives and MinBin float decoding.
+
+Also hosts shared parser size limits + the default frame rate so both
+`fbin_parser` and `rawbin_parser` import them from a single source of truth.
 """
 
 import struct
@@ -9,7 +12,15 @@ import logging
 
 log = logging.getLogger(__name__)
 
-# ── Constants ────────────────────────────────────────────────────────────────
+# ── Shared parser limits (imported by fbin_parser + rawbin_parser) ───────────
+MAX_IMAGES         = 1024
+MAX_MOVIE_CLIPS    = 2000
+MAX_ACTIONS        = 5000
+MAX_FRAMES         = 8000
+MAX_ELEMENTS       = 4096
+DEFAULT_FRAME_RATE = 30
+
+# ── Internal constants ───────────────────────────────────────────────────────
 _ALLOWED_STRING_CHARS = frozenset(
     "abcdefghijklmnopqrstuvwxyz"
     "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -112,9 +123,6 @@ class InputBuffer:
             return 0.0
 
     # ── Navigation ────────────────────────────────────────────────────────────
-
-    def peek_bytes(self, length: int) -> bytes:
-        return self.data[self.offset: self.offset + length]
 
     def tell(self) -> int:
         return self.offset

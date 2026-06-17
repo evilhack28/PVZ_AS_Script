@@ -11,17 +11,15 @@ Field layout per image record (8 × raw float32):
 import struct
 import logging
 
+from input_buffer import (MAX_IMAGES, MAX_MOVIE_CLIPS, MAX_ACTIONS,
+                          MAX_FRAMES, MAX_ELEMENTS)
+
 log = logging.getLogger(__name__)
 
-MAX_IMAGES      = 1024
-MAX_MOVIE_CLIPS = 2000
-MAX_ACTIONS     = 5000
-MAX_FRAMES      = 8000
-MAX_ELEMENTS    = 4096
-_ELEM_SIZE      = 38
+_ELEM_SIZE = 38
 
-# Populated by the successful parse path so callers (e.g. scripts/main.py) can
-# show the detected variant in their summary.  Reset on each parse call.
+# Populated by the successful parse path so callers can show the detected
+# variant in their summary.  Reset on each parse call.
 LAST_INFO: dict = {}
 
 

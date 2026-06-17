@@ -35,7 +35,7 @@ _PAL = {
     "section_dim": (180, 200, 230),
 }
 
-_FPS_LABEL = {"source": "SRC", "meta": "META", "custom": "CUST"}
+_FPS_LABEL = {"source": "SRC", "custom": "CUST"}
 
 # Help overlay content — grouped, two columns.
 _HELP_SECTIONS = [
@@ -51,8 +51,7 @@ _HELP_SECTIONS = [
         ("↑ / ↓",          "Speed ±0.1×"),
     ]),
     ("FPS", [
-        ("R",              "Cycle fps mode"),
-        ("1 / 2 / 3",      "Set fps mode src / meta / custom"),
+        ("1 / 2",          "Set fps mode src / custom"),
         ("4",              "Enter custom fps"),
     ]),
     ("View", [
@@ -65,13 +64,13 @@ _HELP_SECTIONS = [
         ("H",              "Toggle HUD"),
         ("?",              "Toggle this help"),
     ]),
+    ("Filters", [
+        ("K",              "Toggle 'butter' (kungfu head sprite)"),
+    ]),
     ("Export", [
         ("G / A / Z",      "GIF (current / all / all no-bg)"),
         ("S / T",          "Sprites / atlas PNG"),
-        ("X / J",          "XFL / JSON dump"),
-    ]),
-    ("Meta", [
-        ("M",              "Reload metadata file"),
+        ("J",              "JSON dump"),
     ]),
 ]
 
@@ -119,8 +118,7 @@ def _draw_icon_pill(surface, font, text, pos, color):
 class HudMixin:
 
     def _draw_hud(self, mc_idx: int, frame_idx: int,
-                  action_start: int, action_end: int,
-                  meta_cfg=None) -> None:
+                  action_start: int, action_end: int) -> None:
 
         action  = self.playlist[self.current_idx]
         mc      = self.movie_clips[mc_idx]
@@ -186,18 +184,17 @@ class HudMixin:
                                 (pill_x, pill_y), _PAL["pause"])
             pill_x = r.right + gap
 
-        # Second row: render fps + a meta/raw badge (small, dim)
+        if getattr(self, "hide_butter", False):
+            r = _draw_icon_pill(self.screen, self.font, "BUTTER OFF",
+                                (pill_x, pill_y), _PAL["good"])
+            pill_x = r.right + gap
+
+        # Second row: format badge + render fps (small, dim)
         meta_y = pill_y + r.height + 4
-        if meta_cfg is not None:
-            meta_txt = (f"meta  scale {meta_cfg.scale:.2f}  "
-                        f"off ({meta_cfg.offset_x:.0f},{meta_cfg.offset_y:.0f})  "
-                        f"flip {'Y' if meta_cfg.flip else 'N'}  "
-                        f"render {clk_fps:.0f}fps")
-        else:
-            fmt = "RawBin" if self.renderer.rawbin else "FBIN"
-            meta_txt = (f"{fmt}  mc {mc_idx}  frames {len(mc['frames'])}  "
-                        f"action {action_start}-{action_end}  "
-                        f"render {clk_fps:.0f}fps")
+        fmt = "RawBin" if self.renderer.rawbin else "FBIN"
+        meta_txt = (f"{fmt}  mc {mc_idx}  frames {len(mc['frames'])}  "
+                    f"action {action_start}-{action_end}  "
+                    f"render {clk_fps:.0f}fps")
         meta_surf = self.font.render(meta_txt, True, _PAL["pill_dim"])
         self.screen.blit(meta_surf, (10, meta_y))
 

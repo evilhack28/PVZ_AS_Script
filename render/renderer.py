@@ -1,14 +1,7 @@
 """
 renderer.py
 -----------
-Stateful renderer for Cocos2d-x FBIN animations.
-
-Changes from v2
-===============
-* hidden_parts: frozenset of image-name substrings.  Any image whose name
-  contains one of these substrings is skipped during draw.  Set by Player
-  before each action to suppress body parts referenced by the particle table
-  (e.g. suppress the intact head sprites during a "particle_head" action).
+Stateful renderer for Cocos2d-x FBIN / RawBin animations.
 """
 
 import math
@@ -23,17 +16,6 @@ log = logging.getLogger(__name__)
 
 # ── Constants ────────────────────────────────────────────────────────────────
 MAX_CACHE_SIZE = 2048
-
-# Sentinel so `_override_cache` can distinguish a cached `None` (image
-# matched an override whose flip_y_override is None) from "not yet cached".
-_MISSING = object()
-
-# ── Per-sprite name overrides ─────────────────────────────────────────────────
-_NAME_OVERRIDES = {
-    'jaw':    dict(flip_y_override=None),
-    'flag':   dict(flip_y_override=True),
-    '31-031': dict(flip_y_override=True, size_guard=(96, 72)),
-}
 
 
 # ── Bounding box ─────────────────────────────────────────────────────────────
@@ -74,13 +56,12 @@ class Renderer:
         self.texture     = texture_surf
         self.rawbin      = rawbin
         self._cache: OrderedDict = OrderedDict()
-        # Set by Player before each action to suppress named body parts
-        self.hidden_parts: frozenset = frozenset()
-        # Populated at the start of each draw() call (top-level only)
+        # Populated at the start of each draw() call (top-level only).
+        # Used by the RawBin plane-image suppression check.
         self._plane_imgs: set = set()
-        # Per-img_idx resolved _NAME_OVERRIDES flip_y value (None = no override).
-        # Computed lazily on first draw and reused across frames.
-        self._override_cache: dict = {}
+        # Lowercased substrings; any image whose name contains one of these
+        # is skipped during draw. Set by Player (e.g. K-key toggles {'butter'}).
+        self.hidden_parts: frozenset = frozenset()
 
     # ── Public draw call ──────────────────────────────────────────────────────
 
@@ -163,6 +144,14 @@ class Renderer:
                                       -bc / bdet,  ba / bdet)
             else:
                 self._base_inv_lin = (1.0, 0.0, 0.0, 1.0)
+            # Stash the base scale magnitudes (zoom × meta scale) so
+            # `_draw_image` can multiply them back onto the per-sprite scale.
+            # The factor-out above strips them along with the Y-flip, which is
+            # why the old code zoomed positions but not sprites.
+            self._base_scale = (
+                math.sqrt(ba * ba + bb * bb),
+                math.sqrt(bc * bc + bd * bd),
+            )
 
         mc = self.movie_clips[mc_idx]
         if not mc['frames']:
@@ -234,6 +223,13 @@ class Renderer:
                     continue
                 child_mc = self.movie_clips[eid]
 
+                # Hidden-parts filter for MC subtrees (e.g. the 'butter' MC on
+                # kungfu zombies). Skip the whole subtree, not just leaf images.
+                if self.hidden_parts:
+                    mc_name_lower = str(child_mc.get('name', '')).lower()
+                    if any(p in mc_name_lower for p in self.hidden_parts):
+                        continue
+
                 if self.rawbin:
                     if eid == 1 and child_frame >= 0:
                         # mc_id=1 is universally the body-part redirect MC.
@@ -288,13 +284,10 @@ class Renderer:
                 and img_idx in self._plane_imgs):
             return
 
-        # ── Hidden-parts filter ───────────────────────────────────────────────
-        # If the game's particle table says to suppress this sprite name
-        # (e.g. the intact head should be hidden during a particle_head action),
-        # skip it entirely.
+        # ── Hidden-parts filter (e.g. butter on the kungfu zombies' heads) ──
         if self.hidden_parts:
             img_name_lower = str(img_def.get('name', '')).lower()
-            if any(part in img_name_lower for part in self.hidden_parts):
+            if any(p in img_name_lower for p in self.hidden_parts):
                 return
 
         tx_i = int(img_def['tex_x'])
@@ -349,12 +342,14 @@ class Renderer:
         if flip_y:
             scale_y_l = -scale_y_l
 
-        scale_x = scale_x_l
-        scale_y = scale_y_l
-
-        override_flip = self._resolve_override(img_idx)
-        if override_flip is not None:
-            flip_y = override_flip
+        # Re-apply the base scale (zoom × meta scale) that was stripped along
+        # with the Y-flip by `_base_inv_lin`. Without this, positions zoom
+        # but sprites stay native-size — that's the "zoom moves the parts"
+        # behaviour that masked the real geometry. At zoom=1 with no meta
+        # scale this is a no-op so existing layouts are unchanged.
+        bsx, bsy = getattr(self, '_base_scale', (1.0, 1.0))
+        scale_x = scale_x_l * bsx
+        scale_y = scale_y_l * bsy
 
         cache_key = (img_idx, round(scale_x, 4), round(scale_y, 4),
                      round(rotation_deg, 2), flip_y)
@@ -384,35 +379,6 @@ class Renderer:
 
         if bounds is not None:
             bounds.expand(r_rect)
-
-    # ── Name-override resolver (cached per img_idx) ───────────────────────────
-
-    def _resolve_override(self, img_idx: int):
-        """
-        Resolve `_NAME_OVERRIDES` once per image and cache the result.
-        Returns the flip_y value to apply, or None to leave flip_y unchanged.
-        """
-        cached = self._override_cache.get(img_idx, _MISSING)
-        if cached is not _MISSING:
-            return cached
-
-        img_def    = self.images[img_idx]
-        name_lower = str(img_def.get('name', '')).lower()
-        w_i        = int(img_def.get('width', 0))
-        h_i        = int(img_def.get('height', 0))
-
-        result = None
-        for key, overrides in _NAME_OVERRIDES.items():
-            if key not in name_lower:
-                continue
-            sg = overrides.get('size_guard')
-            if sg and (w_i, h_i) != sg:
-                continue
-            result = overrides.get('flip_y_override')
-            break
-
-        self._override_cache[img_idx] = result
-        return result
 
     # ── Transform cache ───────────────────────────────────────────────────────
 

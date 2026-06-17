@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Python toolset for reading, playing, and exporting **Cocos2d-x FBIN / RawBin** animation files from Plants vs. Zombies (and similar games). Built with pygame, numpy (optional), and Pillow (optional).
+Python toolset for reading and playing **Cocos2d-x FBIN / RawBin** animation files from Plants vs. Zombies (and similar games). Built with pygame, numpy (optional), and Pillow.
 
 Install dependencies: `pip install pygame numpy Pillow`
 
@@ -14,74 +14,66 @@ Install dependencies: `pip install pygame numpy Pillow`
 
 ```
 PVZ_AS_Script/
-├── _paths.py         registers library subfolders on sys.path (imported by entry points)
-├── scripts/          entry points (main.py, xfl_main.py, debug_anim.py, test_crop.py)
-├── parsers/          fbin_parser.py, rawbin_parser.py, input_buffer.py
+├── _paths.py         registers library subfolders on sys.path (imported by main.py)
+├── main.py           sole entry point — CLI + run_player(bin, pvr)
+├── parsers/          fbin_parser.py (parse_fbin + parse_binary), rawbin_parser.py, input_buffer.py
 ├── render/           renderer.py + player/ subpackage (core, hud, input, export)
-├── pvr/              pvr_loader.py, pypvr.py
-├── xfl/              xfl_helpers / _sprite / _label / _image / _media / _document / _exporter
-├── config/           default_settings.py, anim_meta.py
-├── writer/           rawbin_writer.py
-├── tests/            round_trip_test.py
-├── tools/            convert_1200_to_1536.py
-└── samples/          example .bin / .pvr / .png files
+├── pvr/              pvr_loader.py (load_pvr_texture + convert_pvr_to_png), pypvr.py
+└── samples/          example .bin / .pvr files
 ```
 
-Imports stay flat (`from fbin_parser import parse_fbin`); each entry point reaches back
-to `_paths.py` to register the library folders before importing project modules.
+Imports stay flat (`from fbin_parser import parse_binary`); `main.py` reaches into
+`_paths.py` to register the library folders before importing project modules.
+
+> **Note:** The XFL exporter, RawBin writer, debug scripts, round-trip tests, resolution-conversion tool, and the per-character display-tweak tables (`config/anim_meta.py` + `config/default_settings.py`) have been removed. The player now renders directly from raw FBIN/RawBin values. XFL export will be rewritten separately and is out of scope for the current state of this repo.
 
 ## Commands
 
 ```bash
-# Play animation (PVR texture or pre-decoded PNG atlas)
-python scripts/main.py --bin samples/char.bin --pvr samples/char.pvr
-python scripts/main.py --bin samples/char.bin --atlas char.png
-python scripts/main.py --bin samples/char.bin --atlas char.png --meta animaction.txt --define zombie_pirate_imp
+# Interactive — file pickers appear for the .bin and .pvr
+python main.py
 
-# Export to Adobe Animate XFL
-python scripts/xfl_main.py --bin samples/char.bin --atlas char.png
-python scripts/xfl_main.py --bin samples/char.bin --atlas char.png --out ./output --stem mychar
-
-# Debug draw tree (no pygame required)
-python scripts/debug_anim.py --bin samples/char.bin                        # all actions, frame 0
-python scripts/debug_anim.py --bin samples/char.bin --action idle --frame 2
-python scripts/debug_anim.py --bin samples/char.bin --dump-mc 17           # raw MC element list, no dedup
-python scripts/debug_anim.py --bin samples/char.bin --scan                 # image counts per frame
-
-# Verify sprite atlas coordinates — FBIN + RawBin, no pygame required
-python scripts/test_crop.py --bin samples/char.bin --atlas char.png --out crops
-
-# RawBin round-trip MD5 test
-python tests/round_trip_test.py samples/char.bin
+# Scripted
+python main.py --bin samples/char.bin --pvr samples/char.pvr
 ```
 
-**Logging:** pass `--log-level DEBUG` to any entry point for verbose parse traces.
+If either flag is omitted, `main._resolve_inputs` opens a tkinter file dialog (anchored at `samples/`) to pick the missing one. Falls back to `input()` if tkinter is unavailable.
+
+Importable API (no CLI):
+```python
+from fbin_parser import parse_binary          # dict-shaped wrapper around parse_fbin
+from pvr_loader  import load_pvr_texture, convert_pvr_to_png
+```
 
 ---
 
 ## Architecture
 
-### Entry points
-| Script | Role |
-|---|---|
-| `scripts/main.py` | Animation player (pygame window) |
-| `scripts/xfl_main.py` | XFL exporter (no display needed) |
-| `scripts/debug_anim.py` | Print MC draw tree to stdout |
-| `scripts/test_crop.py` | Standalone sprite coordinate verifier |
-| `tests/round_trip_test.py` | RawBin parse/write MD5 round-trip |
+### Entry point
+`main.py` is the only entry point. It parses the CLI and calls `run_player(bin, pvr)`,
+which in turn:
+1. Calls `fbin_parser.parse_fbin()` to load images/MCs/actions
+2. Calls `pvr_loader.load_pvr_texture()` to decode the atlas
+3. Constructs `player.Player` and runs the pygame loop
 
 ### Parse pipeline
-`fbin_parser.parse_fbin()` is the single entry point for both formats:
+`fbin_parser` exposes two public functions:
+- `parse_fbin(path)` → `(images, movie_clips, actions, is_rawbin)` tuple (raw)
+- `parse_binary(path)` → dict with keys `format`, `info`, `images`, `movie_clips`, `actions`, `is_rawbin` (or None on failure)
+
+Internally:
 1. Checks for `FBIN` magic bytes at offset 0.
 2. **FBIN path** — tries 4 parse variants (`has_transform` × `order_variant A/B`), validates by checking trailing unconsumed bytes (>16 = wrong variant) and mc_idx range.
 3. **RawBin path** — delegates to `rawbin_parser.parse_rawbin_from_bytes()`. Probes at offset 0 or 12, then tries 4-byte or 6-byte clip headers.
-4. Falls back to a minimal synthetic clip if all variants fail.
+4. Returns `None` if every variant fails (no synthetic fallback).
 
 Returns `(images, movie_clips, actions, is_rawbin)` — the shared data contract used by every downstream module.
 
 After a successful parse, both modules populate a module-level `LAST_INFO` dict that callers can read for the summary:
-- `fbin_parser.LAST_INFO`: `version_ints`, `version_tag` (e.g. `"v1.0"`), `has_transform`, `order`, `num_versions`, `variant_tag`.
+- `fbin_parser.LAST_INFO`: `version_ints`, `version_tag` (e.g. `"v1.0"`), `has_transform`, `order`, `num_versions`, `variant_tag`, `ext_float`.
 - `rawbin_parser.LAST_INFO`: `clip_header_size` (4 or 6), `start_offset` (0 or 12), `consumed`, `total`.
+
+**FBIN `ext_float`** — the MinBin float right after the version header (only present when `has_transform=True`) is a per-character **world unit scale**. It pre-multiplies both every element matrix tx/ty AND every image's `offset_x`/`offset_y` (Flash registration points). Linear matrix terms (sx/ky/kx/sy) and atlas pixel data (width/height/tex_x/tex_y) are NOT scaled — those are in atlas pixels, not FBIN world units. Observed values: `zombie_viking`=0.5, `zombie_horn`=0.8, `zombie_JourneyWest_bullking/zhizhu`=0.7, `zombie_JourneyWest_tudi`=1.0. Without it, files with `ext_float<1.0` render with large vertical gaps between body parts (viking's leg/chest separation) and floating accessory sprites whose huge registration offsets land them far from the body (e.g. horn's eyebrow drifting to the left of the head).
 
 ### Shared data structures
 ```
@@ -103,6 +95,7 @@ Key behaviours that span multiple files:
   - `mc_id=1` → **always redirect to body-part MC[fi]**. MC[1] is universally a 1-frame redirect-wrapper (named `ground_swatch`, `zombie_imp_pirate_hand1`, etc.) whose fi value is the *target MC index*, not an image index. The target MC then draws its own sub-sprites (e.g. MC[15]=zombie_basic_eye draws image 14).
   - `mc_id≠1` (eid=0 ground, eid=2 image-pointer, etc.) → **draw image fi directly** when fi < len(images). This is the terminal draw for all body-part sub-elements.
 - **Transform cache**: LRU, up to 2048 pre-scaled/rotated surfaces (`_NAME_OVERRIDES` applies hardcoded flip/size corrections for `jaw`, `flag`, `31-031`).
+- **Alpha is leaf-only**: `_draw_image()` reads `elem['alpha']` from the leaf image element. Alpha set on an `is_mc=True` parent is NOT propagated to children. (This is a known limitation — relevant when a transparency effect is authored on a MovieClip instance rather than a leaf image, e.g. `zombie_kungfu_hammer`.)
 
 ### Player
 `render/player/` is a 4-file subpackage. `__init__.py` composes the final class:
@@ -114,15 +107,14 @@ concern:
 | `core.py` | `PlayerConfig`, `_PlayerCore` — `__init__`, run loop, `_base_transform`, `_meta_for_action`, `_resolve_fps`, `_build_playlist` |
 | `hud.py` | `HudMixin` — `_draw_hud`, `_draw_action_list` |
 | `input.py` | `InputMixin` — `_handle_events`, `_handle_key` |
-| `export.py` | `ExportMixin` — GIF / sprites / atlas / JSON / XFL exports |
+| `export.py` | `ExportMixin` — GIF / sprites / atlas / JSON exports |
 
 `_base_transform()` maps from Cocos Y-up space to pygame screen space (Y-flip is built in).
 With `AnimMeta`, it additionally applies per-action scale, offset, flip, and frame-range overrides.
 
 FPS resolution priority (`_resolve_fps`), per `fps_mode`:
 - `custom` → `fps_custom`
-- `meta`   → meta file → MC `frame_rate` → `DEFAULT_FRAME_RATE` (30)
-- `source` → MC `frame_rate` → meta file → `DEFAULT_FRAME_RATE` (30)
+- otherwise → MC `frame_rate` if > 0, else `DEFAULT_FRAME_RATE` (30)
 
 **In-player keyboard controls:**
 | Key | Action |
@@ -135,16 +127,14 @@ FPS resolution priority (`_resolve_fps`), per `fps_mode`:
 | F | Jump to frame (type number, Enter) |
 | L | Toggle loop |
 | I | Open action picker |
-| R | Cycle fps mode (source → meta → custom) |
-| 1 / 2 / 3 | Set fps mode directly |
+| 1 / 2 | Set fps mode: source / custom |
 | 4 | Enter custom fps value |
-| M | Hot-reload metadata file |
+| K | Toggle "butter" sprite hide (kungfu zombies' head accessory) |
 | G | Export current action to GIF |
 | A | Export all actions as GIFs |
 | Z | Export all actions as no-background GIFs |
 | S | Export individual sprites |
 | T | Export atlas as PNG |
-| X | Export XFL / .fla |
 | J | Dump frame data as JSON |
 | H | Toggle HUD |
 | ? | Toggle help overlay (full key list) |
@@ -155,14 +145,6 @@ FPS resolution priority (`_resolve_fps`), per `fps_mode`:
 | Right-drag | Pan the canvas |
 | Left-click scrub bar | Seek to that frame (drag to scrub) |
 
-### Optional metadata (`animaction.txt`)
-A TSV/CSV file providing per-action scale, offset, fps, flip, and frame-range overrides. Auto-discovered in the `.bin` folder → `cwd` → script folder. Loaded via `config/anim_meta.py` (`AnimMeta.load()`). Override with `--meta PATH` or disable with `--no-meta`.
-
-`config/anim_meta.py` is a minimal TSV/CSV reader exposing `AnimMeta`, `ActionConfig`, and `ParticleConfig`. The action table is the default; a `[particles]` header switches to the particle table. Returns an empty `AnimMeta` (whose `is_empty()` is True) when the file is missing or unparseable, so callers fall back to `default_settings.py` or raw FBIN values.
-
-### `config/default_settings.py`
-Hardcoded fallback per-character display settings. **Only for FBIN files** — RawBin files already store absolute world positions and must NOT have entries here. Each character entry maps a define key (= `.bin` stem) to `{offset_x, offset_y, scale, fps, flip, actions}`.
-
 ---
 
 ## Critical constraints
@@ -170,7 +152,6 @@ Hardcoded fallback per-character display settings. **Only for FBIN files** — R
 - **FBIN `offset_x/y`** — Flash registration points. **Never clamp** them; they can legitimately exceed sprite dimensions.
 - **RawBin `offset_x/y`** — Also Flash registration points. **Never clamp** them either: when the same character is re-exported as FBIN (e.g. `zombie_JourneyWest_tieguo` v32 RawBin vs v33 FBIN) the raw float values match byte-for-byte. An earlier `abs(offset) >= dimension → 0` clamp destroyed legitimate registrations for body parts pivoted at joints.
 - **RawBin world positions are absolute** — do not add character-level scale/offset on top.
-- **`default_settings.py` is FBIN-only** — adding entries for RawBin characters breaks rendering.
 - Renderer skips sprites at `tex_x=0, tex_y=0` with `size ≤ 4×4` (Flash pivot/registration markers; contain PVRTC block garbage).
 - PVRTC decoding requires power-of-two textures and wraps blocks (modulo).
 

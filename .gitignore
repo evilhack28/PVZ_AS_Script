@@ -1,7 +1,3 @@
-__pycache__/
-/Lib
-*.gif
-*.bin
-*.pvr
-*.png
 *.pyc
+/samples
+/.claude

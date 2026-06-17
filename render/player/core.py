@@ -19,8 +19,7 @@ log = logging.getLogger(__name__)
 # ── Config ────────────────────────────────────────────────────────────────────
 
 # Valid fps_mode values:
-#   'source'  - use the raw fps stored in the animation (FBIN) or default 24 (RawBin)
-#   'meta'    - use the fps from the loaded metadata file (animaction.txt / --meta)
+#   'source'  - use the raw frame_rate stored in the MC
 #   'custom'  - use fps_custom value regardless of source
 
 @dataclass
@@ -33,8 +32,8 @@ class PlayerConfig:
     background_rgb: tuple = (40, 40, 40)
     hud_font_size:  int   = 16
     pvr_name:       str   = "sprites"   # stem of the .pvr file, used as export folder name
-    output_dir:     str   = "."         # base directory for all exports (GIF/XFL/sprites/atlas/JSON)
-    fps_mode:       str   = "meta"      # 'source' | 'meta' | 'custom'
+    output_dir:     str   = "."         # base directory for all exports (GIF/sprites/atlas/JSON)
+    fps_mode:       str   = "source"    # 'source' | 'custom'
     fps_custom:     int   = 30          # fps used when fps_mode == 'custom'
     show_help:      bool  = False       # ? overlay
     fullscreen:     bool  = False       # F11 toggle
@@ -50,17 +49,13 @@ class _PlayerCore:
                  texture_surf: pygame.Surface,
                  config: Optional[PlayerConfig] = None,
                  rawbin: bool = False,
-                 anim_meta=None,       # AnimMeta instance or None
-                 define_key: str = "",
-                 meta_source: str = "") -> None:
+                 define_key: str = "") -> None:
 
         self.images      = images
         self.movie_clips = movie_clips
         self.texture     = texture_surf
         self.cfg         = config or PlayerConfig()
-        self.anim_meta   = anim_meta
         self.define_key  = define_key
-        self.meta_source = meta_source   # path to the loaded meta file, for hot-reload
         self.renderer    = Renderer(images, movie_clips, texture_surf, rawbin=rawbin)
 
         self.playlist = self._build_playlist(actions)
@@ -79,6 +74,11 @@ class _PlayerCore:
         self.show_list     = False
         self.list_selected = self.current_idx
         self.show_hud      = True
+
+        # K key toggles this. When True, any sprite whose name contains
+        # 'butter' is suppressed during draw — useful on the kungfu zombies
+        # whose butter sprite covers the head.
+        self.hide_butter = False
 
         # Temporary status message shown after GIF export
         self._gif_msg      = ""
@@ -113,85 +113,19 @@ class _PlayerCore:
         # Left-button scrub-drag state (True while held inside the scrub bar)
         self._scrub_dragging = False
 
-    # ── Meta helpers ──────────────────────────────────────────────────────────
-
-    def _meta_for_action(self, action: dict):
-        """
-        Return an ActionConfig for this action.
-
-        Priority order:
-          1. External --meta TSV file (anim_meta)     - most authoritative
-          2. default_settings.py hardcoded table      - built-in fallback
-          3. None - renderer uses raw FBIN values
-        """
-        action_name = action.get("name", "")
-
-        # 1. TSV file
-        if self.anim_meta is not None and self.define_key:
-            cfg = self.anim_meta.action_config(self.define_key, action_name)
-            if cfg is not None:
-                return cfg
-
-        # 2. default_settings fallback
-        if self.define_key:
-            try:
-                from default_settings import get_action_config
-                d = get_action_config(self.define_key, action_name)
-                # Only return a synthetic ActionConfig if we actually have
-                # a known entry (scale != 1 or offset != 0 are the tells)
-                if (d["scale"] != 1.0 or d["offset_x"] != 0.0
-                        or d["offset_y"] != 0.0 or d["fps"] != 0):
-                    from anim_meta import ActionConfig
-                    return ActionConfig(
-                        define      = self.define_key,
-                        action_name = action_name,
-                        flip        = bool(d.get("flip", False)),
-                        loop        = True,
-                        offset_x    = d["offset_x"],
-                        offset_y    = d["offset_y"],
-                        scale       = d["scale"],
-                        fps         = d["fps"],
-                    )
-            except ImportError:
-                pass  # default_settings.py not present - that's fine
-
-        return None
-
-    def _base_transform(self, screen_w: int, screen_h: int,
-                        meta_cfg=None) -> tuple:
+    def _base_transform(self, screen_w: int, screen_h: int) -> tuple:
         """
         Build the root affine transform (a, b, c, d, tx, ty) that maps from
-        Cocos Y-up space to pygame screen space.
-
-        Without metadata this is the identity + Y-flip centred on screen:
-            (1, 0, 0, -1, cx, cy)
-
-        With an ActionConfig we additionally apply:
-            - uniform scale  (from meta_cfg.scale)
-            - X/Y world offset  (from meta_cfg.offset_x / offset_y)
+        Cocos Y-up space to pygame screen space. Identity + Y-flip centred on
+        the screen, with zoom/pan/RawBin-recentre applied.
         """
         cx = screen_w * 0.5
         cy = screen_h * 0.5
-
-        z = self.zoom
-        px, py = self.pan_x, self.pan_y
-
-        if meta_cfg is None:
-            ox, oy = self._rawbin_center_offset
-            return (z, 0.0, 0.0, -z, cx - ox + px, cy - oy + py)
-
-        s   = meta_cfg.scale if meta_cfg.scale > 0 else 1.0
-        # offset_x/y represent the FOOT (ground contact) position within the
-        # animation's bounding box in screen pixels at the given scale.
-        #   tx = cx - offset_x * s   (LEFT  so foot is horizontally centred)
-        #   ty = cy + offset_y * s   (DOWN  so foot sits at screen centre)
-        tx  = cx - meta_cfg.offset_x * s
-        ty  = cy + meta_cfg.offset_y * s
-
-        # Horizontal flip: negate the X scale column
-        sx = -s if meta_cfg.flip else s
-
-        return (sx * z, 0.0, 0.0, -s * z, tx + px, ty + py)
+        z  = self.zoom
+        ox, oy = self._rawbin_center_offset
+        return (z, 0.0, 0.0, -z,
+                cx - ox + self.pan_x,
+                cy - oy + self.pan_y)
 
     def _probe_rawbin_center(self, mc_idx: int,
                              a_start: int, a_end: int) -> tuple:
@@ -229,36 +163,12 @@ class _PlayerCore:
                 return (dx, dy)
         return (0.0, 0.0)
 
-    def _hidden_parts_for_action(self, action: dict) -> frozenset:
+    def _resolve_fps(self, action: dict, mc=None) -> int:
         """
-        Return a frozenset of image-name substrings that should be suppressed
-        for this action (used by the particle table for detached body parts).
-        """
-        if self.anim_meta is None or not self.define_key:
-            return frozenset()
-        action_name = action.get("name", "").lower()
-        pcfg = self.anim_meta.particle_config(self.define_key, action_name)
-        if pcfg is None:
-            return frozenset()
-        hidden = set()
-        for part in (pcfg.hide_part1, pcfg.hide_part2):
-            part = str(part).strip()
-            if part and part != "0":
-                hidden.add(part.lower())
-        return frozenset(hidden)
+        Return the playback fps for *action*.
 
-    def _resolve_fps(self, action: dict, mc=None, meta_cfg=None) -> int:
-        """
-        Return the playback fps for *action* according to the current fps_mode.
-
-        Per-mode order
-        --------------
         'custom' → self.fps_custom
-        'meta'   → meta file → MC `frame_rate` → DEFAULT_FRAME_RATE
-        'source' → MC `frame_rate` → meta file → DEFAULT_FRAME_RATE
-
-        `meta_cfg` may be supplied by the caller to skip the lookup; if
-        omitted it is resolved on demand only when actually consulted.
+        otherwise → MC `frame_rate` if > 0, else DEFAULT_FRAME_RATE
         """
         if self.fps_mode == 'custom':
             return max(1, self.fps_custom)
@@ -267,53 +177,7 @@ class _PlayerCore:
             midx = action.get('mc_idx', -1)
             mc   = self.movie_clips[midx] if 0 <= midx < len(self.movie_clips) else None
         mc_fps = mc.get('frame_rate', 0) if mc else 0
-
-        _meta_unset = object()
-        meta = meta_cfg if meta_cfg is not None else _meta_unset
-
-        def _meta_fps():
-            nonlocal meta
-            if meta is _meta_unset:
-                meta = self._meta_for_action(action)
-            return meta.fps if meta and meta.fps > 0 else 0
-
-        if self.fps_mode == 'meta':
-            fps = _meta_fps()
-            if fps > 0:
-                return fps
-            if mc_fps > 0:
-                return mc_fps
-        else:  # 'source'
-            if mc_fps > 0:
-                return mc_fps
-            fps = _meta_fps()
-            if fps > 0:
-                return fps
-
-        return DEFAULT_FRAME_RATE
-
-    def _reload_meta(self) -> None:
-        """Reload the meta file from disk without restarting the player."""
-        if not self.meta_source:
-            self._gif_msg     = "No meta file loaded - nothing to reload"
-            self._gif_msg_ttl = 120
-            return
-        try:
-            from anim_meta import AnimMeta
-            fresh = AnimMeta.load(action_tsv=self.meta_source,
-                                  particle_tsv=self.meta_source)
-            if fresh.is_empty():
-                self._gif_msg     = f"Reload failed - no valid table found in {self.meta_source}"
-                self._gif_msg_ttl = 180
-                return
-            self.anim_meta    = fresh
-            self._gif_msg     = f"Meta reloaded  ({self.meta_source})"
-            self._gif_msg_ttl = 180
-            log.info("Meta reloaded: %s", self.meta_source)
-        except Exception as exc:
-            self._gif_msg     = f"Reload error: {exc}"
-            self._gif_msg_ttl = 180
-            log.error("Meta reload failed: %s", exc)
+        return mc_fps if mc_fps > 0 else DEFAULT_FRAME_RATE
 
     # ── View helpers (zoom/pan/fullscreen/screenshot) ─────────────────────────
 
@@ -383,12 +247,8 @@ class _PlayerCore:
         last_frame = max(0, len(mc['frames']) - 1)
         action_start, action_end = self._clamp_action_range(action, last_frame)
 
-        # Metadata overrides — resolved once per action entry, reused below.
-        meta_cfg     = self._meta_for_action(action)
-        hidden_parts = self._hidden_parts_for_action(action)
-
         # RawBin auto-centering: probe action bounds once per mc_idx
-        if self.renderer.rawbin and meta_cfg is None:
+        if self.renderer.rawbin:
             if mc_idx not in self._rawbin_offsets:
                 self._rawbin_offsets[mc_idx] = self._probe_rawbin_center(
                     mc_idx, action_start, action_end)
@@ -396,20 +256,8 @@ class _PlayerCore:
         else:
             self._rawbin_center_offset = (0.0, 0.0)
 
-        # FPS resolved by current fps_mode (source / meta / custom)
-        frame_rate = self._resolve_fps(action, mc, meta_cfg)
-
-        # Frame range: meta wins if both sframe/eframe are non-zero
-        if meta_cfg and (meta_cfg.start_frame > 0 or meta_cfg.end_frame > 0):
-            meta_start = max(0, min(meta_cfg.start_frame, last_frame))
-            meta_end   = max(0, min(meta_cfg.end_frame,   last_frame))
-            if meta_end > meta_start:
-                action_start, action_end = meta_start, meta_end
-
-        # Loop flag for this action: meta wins if loaded, otherwise the
-        # user's L-key toggle (`self.loop`) is authoritative. We keep this
-        # local so meta does NOT clobber the user toggle across actions.
-        play_loop = meta_cfg.loop if meta_cfg is not None else self.loop
+        frame_rate = self._resolve_fps(action, mc)
+        play_loop  = self.loop
 
         frame_dur   = 1000.0 / frame_rate
         frame_idx   = action_start
@@ -417,16 +265,10 @@ class _PlayerCore:
         anim_active = True
         self._step_frame_idx = None
 
-        # The render clock must run at least as fast as the animation fps.
         render_cap = max(self.cfg.fps_cap, frame_rate)
 
-        # Push hidden_parts into renderer for this action
-        self.renderer.hidden_parts = hidden_parts
-
-        log.info("Playing '%s'  [MC: %s]  frames %d-%d  @%dfps  scale=%.2f  meta=%s",
-                 action['name'], mc['name'], action_start, action_end, frame_rate,
-                 meta_cfg.scale if meta_cfg else 1.0,
-                 "yes" if meta_cfg else "no")
+        log.info("Playing '%s'  [MC: %s]  frames %d-%d  @%dfps",
+                 action['name'], mc['name'], action_start, action_end, frame_rate)
 
         while anim_active:
             dt = self.clock.tick(render_cap)
@@ -454,23 +296,21 @@ class _PlayerCore:
                     else:
                         anim_active = False
 
-            # Render - pass meta_cfg so base transform is correct
             frame_bounds = BoundingBox()
             self._render(mc_idx, frame_idx, frame_bounds,
-                         action_start, action_end, meta_cfg)
+                         action_start, action_end)
 
         return True
 
     # ── Rendering ─────────────────────────────────────────────────────────────
 
     def _render(self, mc_idx: int, frame_idx: int, frame_bounds: BoundingBox,
-                action_start: int, action_end: int,
-                meta_cfg=None) -> None:
+                action_start: int, action_end: int) -> None:
         sw, sh = self.screen.get_size()
-        base   = self._base_transform(sw, sh, meta_cfg)
+        base   = self._base_transform(sw, sh)
         self.screen.fill(self.cfg.background_rgb)
         self.renderer.draw(self.screen, mc_idx, frame_idx, base, frame_bounds)
-        self._draw_hud(mc_idx, frame_idx, action_start, action_end, meta_cfg)
+        self._draw_hud(mc_idx, frame_idx, action_start, action_end)
         pygame.display.flip()
 
     # ── Playlist + frame range helpers ────────────────────────────────────────

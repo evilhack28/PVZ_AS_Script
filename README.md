@@ -1,13 +1,8 @@
 # PVZ_AS_Script
 
-A Python toolset for reading, playing, and exporting **Cocos2d-x FBIN / RawBin** animation files from *Plants vs. Zombies* (and other Cocos2d-x games that use the same format).
+A Python tool for **reading and playing Cocos2d-x FBIN / RawBin animation files** from *Plants vs. Zombies* (and other Cocos2d-x games that use the same format).
 
-You can use it to:
-
-- Play a `.bin` animation in a window with full playback controls.
-- Export animations to **GIF**, **PNG sprites**, **atlases**, **JSON frame data**, or **Adobe Animate XFL / .fla** projects.
-- Inspect the internal draw tree for debugging or research.
-- Round-trip RawBin files (parse and re-write byte-for-byte).
+The current build is intentionally minimal: it decodes the PVR texture, parses the .bin animation, and plays it in a pygame window. The XFL exporter is gone and will be rewritten separately.
 
 ---
 
@@ -18,7 +13,7 @@ You can use it to:
 | **FBIN** | `FBIN` at offset 0 | Newer PvZ format. Parser tries 4 variants and auto-detects. |
 | **RawBin** | none (legacy) | Older PvZ format. Parser probes offsets 0/12 and 4/6-byte clip headers. |
 
-Both produce the same in-memory data structure, so every downstream tool (player, exporter, debugger) works on either.
+The PVR loader handles **iOS PVR v2** (RGBA4444 / RGBA8888 / PVRTC4) directly and falls back to **Dreamcast/Naomi PVRT** via the bundled `pypvr` decoder.
 
 ---
 
@@ -31,55 +26,22 @@ pip install pygame numpy Pillow
 ```
 
 - `pygame` — required (window + rendering).
-- `numpy` — optional, speeds up texture decode.
-- `Pillow` — optional, needed for PNG / GIF / atlas export.
+- `numpy` — optional, speeds up PVRTC4 texture decode.
+- `Pillow` — optional, needed for GIF / atlas / sprite export.
 
 ---
 
-## Quick start
-
-### Play an animation
+## Run
 
 ```bash
-# Using a PVR texture
-python scripts/main.py --bin samples/char.bin --pvr samples/char.pvr
+# Interactive — pops up file pickers for the .bin and the .pvr
+python main.py
 
-# Using a pre-decoded PNG atlas
-python scripts/main.py --bin samples/char.bin --atlas char.png
-
-# With per-action metadata overrides
-python scripts/main.py --bin samples/char.bin --atlas char.png --meta animaction.txt --define zombie_pirate_imp
+# Scripted
+python main.py --bin samples/zombie_kungfu_torch.bin --pvr samples/zombie_kungfu_torch.pvr
 ```
 
-### Export to Adobe Animate (XFL)
-
-```bash
-python scripts/xfl_main.py --bin samples/char.bin --atlas char.png
-python scripts/xfl_main.py --bin samples/char.bin --atlas char.png --out ./output --stem mychar
-```
-
-### Inspect the draw tree (no window)
-
-```bash
-python scripts/debug_anim.py --bin samples/char.bin                  # all actions, frame 0
-python scripts/debug_anim.py --bin samples/char.bin --action idle --frame 2
-python scripts/debug_anim.py --bin samples/char.bin --dump-mc 17     # raw MC element list
-python scripts/debug_anim.py --bin samples/char.bin --scan           # image counts per frame
-```
-
-### Verify sprite atlas coordinates
-
-```bash
-python scripts/test_crop.py --bin samples/char.bin --atlas char.png --out crops
-```
-
-### RawBin round-trip MD5 test
-
-```bash
-python tests/round_trip_test.py samples/char.bin
-```
-
-Add `--log-level DEBUG` to any entry point for verbose parse traces.
+If you omit `--bin` or `--pvr`, a tkinter file dialog opens (anchored at `samples/`) so you can click the files.
 
 ---
 
@@ -89,31 +51,39 @@ Add `--log-level DEBUG` to any entry point for verbose parse traces.
 |---|---|
 | `ESC` / `Q` | Quit |
 | `←` / `→` | Previous / next action |
-| `↑` / `↓` | Speed +0.1x / -0.1x |
+| `↑` / `↓` | Speed +0.1× / -0.1× |
 | `SPACE` | Pause / resume |
-| `N` / `B` | Step one frame forward / back |
+| `N` / `B` | Step one frame forward / back (auto-pauses) |
 | `F` | Jump to frame (type number, Enter) |
 | `L` | Toggle loop |
 | `I` | Open action picker |
-| `R` | Cycle fps mode (source → meta → custom) |
-| `1` / `2` / `3` | Set fps mode directly |
-| `4` | Enter custom fps value |
-| `M` | Hot-reload metadata file |
+| `K` | Toggle "butter" sprite (hides the head accessory on kungfu zombies) |
+| `1` / `2` | Set fps mode: source / custom |
+| `4` | Enter a custom fps value |
 | `G` | Export current action to GIF |
 | `A` | Export all actions as GIFs |
-| `Z` | Export all actions as no-background GIFs |
-| `S` | Export individual sprites |
+| `Z` | Export all actions as transparent-background GIFs |
+| `S` | Export individual sprite PNGs |
 | `T` | Export atlas as PNG |
-| `X` | Export XFL / .fla |
 | `J` | Dump frame data as JSON |
 | `H` | Toggle HUD |
 | `?` | Toggle full help overlay |
 | `0` | Reset zoom and pan |
 | `F11` | Toggle fullscreen |
-| `PrtScr` | Save PNG screenshot |
+| `PrtScr` | Save PNG screenshot of the current frame |
 | Mouse wheel | Zoom in / out |
 | Right-drag | Pan canvas |
 | Left-click scrub bar | Seek (drag to scrub) |
+
+---
+
+## Importable API
+
+```python
+from fbin_parser import parse_binary             # dict-shaped: format/info/images/movie_clips/actions
+from pvr_loader  import load_pvr_texture          # PVR -> pygame.Surface
+from pvr_loader  import convert_pvr_to_png        # PVR -> PNG on disk
+```
 
 ---
 
@@ -121,54 +91,43 @@ Add `--log-level DEBUG` to any entry point for verbose parse traces.
 
 ```
 PVZ_AS_Script/
-├── _paths.py         registers library subfolders on sys.path
-├── scripts/          entry points (main, xfl_main, debug_anim, test_crop)
-├── parsers/          fbin_parser, rawbin_parser, input_buffer
-├── render/           renderer + player/ subpackage (core, hud, input, export)
-├── pvr/              pvr_loader, pypvr (PVR texture decoder)
-├── xfl/              XFL/.fla exporter modules
-├── config/           default_settings, anim_meta
-├── writer/           rawbin_writer (re-emits RawBin bytes)
-├── tests/            round-trip test
-├── tools/            convert_1200_to_1536
-└── samples/          example .bin / .pvr / .png files
+├── _paths.py        registers library subfolders on sys.path
+├── main.py          sole entry point — CLI + run_player(bin, pvr)
+├── parsers/         fbin_parser (parse_fbin + parse_binary), rawbin_parser, input_buffer
+├── render/          renderer + player/ subpackage (core, hud, input, export)
+├── pvr/             pvr_loader (load_pvr_texture + convert_pvr_to_png), pypvr
+└── samples/         example .bin / .pvr files
 ```
 
-Imports stay flat (`from fbin_parser import parse_fbin`); each entry point reaches
-back to `_paths.py` to register the library folders before importing project
-modules.
+Imports stay flat (`from fbin_parser import parse_binary`); `main.py` reaches into `_paths.py` to register the library folders before importing project modules.
 
 ---
 
 ## How the pipeline works
 
 ```
-   .bin file
-      │
-      ▼
+  .bin file
+     │
+     ▼
 ┌──────────────────────────┐
 │ fbin_parser.parse_fbin() │   ← single entry for both formats
 └──────────────────────────┘
-      │
-      │  FBIN magic at offset 0?
-      │
-      ├── yes ──► tries 4 FBIN variants, picks the one with clean trailing bytes
-      │
-      └── no  ──► rawbin_parser.parse_rawbin_from_bytes()
-                     probes offset 0 or 12, 4-byte or 6-byte clip headers
-      │
-      ▼
-   (images, movie_clips, actions, is_rawbin)
-      │
-      ├──► Renderer (pygame window)
-      ├──► XFL exporter (.fla project)
-      ├──► GIF / PNG / atlas / JSON exporters
-      └──► RawBin writer (round-trip)
+     │
+     │  FBIN magic at offset 0?
+     │
+     ├── yes ──► tries 4 FBIN variants, picks the one with clean trailing bytes
+     │
+     └── no  ──► rawbin_parser.parse_rawbin_from_bytes()
+                    probes offset 0 or 12, 4-byte or 6-byte clip headers
+     │
+     ▼
+  (images, movie_clips, actions, is_rawbin)
+     │
+     ▼
+  Player (pygame window)
 ```
 
 ### Shared data contract
-
-Every downstream module receives the same four-tuple:
 
 ```python
 images      # [{name, offset_x, offset_y, width, height, tex_x, tex_y, origin_x, origin_y}, ...]
@@ -185,32 +144,16 @@ Each frame is a list of `element` dicts:
 
 ---
 
-## Optional metadata (`animaction.txt`)
-
-A small TSV/CSV file that overrides per-action scale, offset, fps, flip, and
-frame ranges. It's auto-discovered in:
-
-1. the `.bin` folder, then
-2. the current working directory, then
-3. the script folder.
-
-Override the path with `--meta PATH` or skip discovery with `--no-meta`.
-
----
-
 ## Notes on the format
 
-- **FBIN `offset_x/y`** are Flash registration points — they can legitimately
-  exceed sprite dimensions and must never be clamped.
-- **RawBin** stores absolute world positions; character-level scale / offset is
-  not added on top.
-- The renderer skips sprites at `tex_x=0, tex_y=0` with `size ≤ 4×4` (Flash
-  pivot / registration markers, not real images).
+- **FBIN `offset_x/y`** are Flash registration points — they can legitimately exceed sprite dimensions and must never be clamped.
+- **RawBin** stores absolute world positions; character-level scale / offset is not added on top.
+- The renderer skips sprites at `tex_x=0, tex_y=0` with `size ≤ 4×4` (Flash pivot / registration markers, not real images).
 - PVRTC decoding requires power-of-two textures and wraps blocks (modulo).
+- Some kungfu-zombie samples wear a `butter` sprite over the face — press **`K`** in the player to hide it.
 
 ---
 
 ## License
 
-This project is for educational and research purposes. Game assets are
-property of their respective owners.
+This project is for educational and research purposes. Game assets are property of their respective owners.

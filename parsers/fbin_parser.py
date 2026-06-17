@@ -20,28 +20,48 @@ FBIN — do NOT clamp them.  They are Flash registration points that may
 sit far outside the sprite boundary.
 """
 
-import os
 import struct
 import logging
 
-from input_buffer import InputBuffer, BufferError
+from input_buffer import (InputBuffer, BufferError,
+                          MAX_IMAGES, MAX_MOVIE_CLIPS, MAX_ACTIONS,
+                          MAX_FRAMES, MAX_ELEMENTS, DEFAULT_FRAME_RATE)
 
 log = logging.getLogger(__name__)
 
-MAX_IMAGES         = 1024
-MAX_MOVIE_CLIPS    = 2000
-MAX_ACTIONS        = 5000
-MAX_FRAMES         = 8000
-MAX_ELEMENTS       = 4096
-DEFAULT_FRAME_RATE = 30
-
-# Populated by the successful parse path so callers (e.g. scripts/main.py) can
+# Populated by the successful parse path so callers can
 # show the file's encoded version + variant in their summary.  Reset on each
 # parse_fbin() call.
 LAST_INFO: dict = {}
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
+
+def parse_binary(bin_path) -> dict | None:
+    """High-level wrapper around `parse_fbin()` that returns the parsed data
+    as a single dict (or None on failure). Use this as the entry point from
+    application code.
+
+    Keys:
+        format       'FBIN' or 'RawBin'
+        info         the parser's LAST_INFO snapshot (version, has_transform, ext_float, ...)
+        images       list of image dicts (name, offset_x/y, width/height, tex_x/y, ...)
+        movie_clips  list of MC dicts (name, frames, frame_rate)
+        actions      list of action dicts (name, start, end, mc_idx, p4)
+        is_rawbin    bool
+    """
+    images, movie_clips, actions, is_rawbin = parse_fbin(str(bin_path))
+    if images is None or movie_clips is None:
+        return None
+    return {
+        "format":      "RawBin" if is_rawbin else "FBIN",
+        "info":        dict(LAST_INFO),
+        "images":      images,
+        "movie_clips": movie_clips,
+        "actions":     actions,
+        "is_rawbin":   is_rawbin,
+    }
+
 
 def parse_fbin(bin_path: str):
     """
@@ -87,11 +107,7 @@ def parse_fbin(bin_path: str):
     finally:
         ib_log.setLevel(prev_level)
 
-    log.warning("All FBIN variants failed — attempting minimal fallback.")
-    result = _minimal_fallback(data, bin_path)
-    if result[0] is not None:
-        return result[0], result[1], result[2], False
-
+    log.warning("All FBIN variants failed for '%s'.", bin_path)
     return None, None, None, False
 
 
@@ -108,11 +124,12 @@ def _parse_impl(data: bytes, *, has_transform: bool, order_variant: str,
         for _ in range(max(0, num_versions)):
             version_ints.append(buf.read_int())
 
+        ext_float = 1.0
         if has_transform:
             saved = buf.tell()
             try:
-                _ext_v1    = buf.read_int()
-                _ext_float = buf.read_float_min(100.0)
+                _ext_v1   = buf.read_int()
+                ext_float = buf.read_float_min(100.0)
             except BufferError:
                 buf.seek(saved)
 
@@ -121,8 +138,27 @@ def _parse_impl(data: bytes, *, has_transform: bool, order_variant: str,
         movie_clips           = _read_movie_clips(buf, len(export_table),
                                                   export_table, has_transform)
 
-        if not movie_clips and images:
-            movie_clips = [_make_pseudo_clip("PseudoClip", images)]
+        # ── Apply ext_float as a world-coordinate scale ──────────────────────
+        # The float after the version header (e.g. 0.5 for zombie_viking,
+        # 0.7 for zombie_JourneyWest_bullking, 1.0 for zombie_JourneyWest_tudi,
+        # 0.8 for zombie_horn) is the file's "world unit scale". Element tx/ty
+        # AND image offset_x/offset_y are stored at the raw inflated coords
+        # and need to be scaled by this factor so body parts render connected
+        # and Flash registration points land in the right place. Without it,
+        # viking has huge leg/chest gaps and horn's eyebrow floats off to the
+        # left of the head. Linear matrix terms (sx/ky/kx/sy) and atlas pixel
+        # data (width/height/tex_x/tex_y) are NOT scaled — they're in atlas
+        # pixels, not FBIN world units.
+        if ext_float and ext_float != 1.0:
+            for im in images:
+                im['offset_x'] *= ext_float
+                im['offset_y'] *= ext_float
+            for mc in movie_clips:
+                for fr in mc['frames']:
+                    for el in fr:
+                        a, b, c, d, tx, ty = el['matrix']
+                        el['matrix'] = (a, b, c, d,
+                                        tx * ext_float, ty * ext_float)
 
         # ── Validate: buffer should be mostly consumed ────────────────────────
         # If the wrong variant was selected (e.g. has_transform=True on a file
@@ -158,6 +194,7 @@ def _parse_impl(data: bytes, *, has_transform: bool, order_variant: str,
             "order":         order_variant,
             "num_versions":  num_versions,
             "variant_tag":   tag,
+            "ext_float":     ext_float,
         })
         log.debug("[%s] Parsed %d images, %d clips, %d actions.",
                   tag, len(images), len(movie_clips), len(actions))
@@ -326,51 +363,3 @@ def _read_element(buf: InputBuffer) -> dict:
     }
 
 
-# ── Pseudo-clip builder ───────────────────────────────────────────────────────
-
-def _make_pseudo_clip(name: str, images: list) -> dict:
-    return {
-        "name": name,
-        "frames": [[{
-            "is_mc": False, "id": idx, "frame_index": -1,
-            "matrix": (1.0, 0.0, 0.0, 1.0, 0.0, 0.0),
-            "alpha": 1.0, "color_mult": None, "color_add": None,
-        } for idx in range(len(images))]],
-        "frame_rate": DEFAULT_FRAME_RATE,
-    }
-
-
-# ── Minimal fallback ──────────────────────────────────────────────────────────
-
-def _minimal_fallback(data: bytes, bin_path: str):
-    ib_log = logging.getLogger("input_buffer")
-    prev_level = ib_log.level
-    ib_log.setLevel(logging.ERROR)
-    try:
-        return _minimal_fallback_impl(data, bin_path)
-    finally:
-        ib_log.setLevel(prev_level)
-
-
-def _minimal_fallback_impl(data: bytes, bin_path: str):
-    for num_versions in (2, 1):
-        try:
-            buf = InputBuffer(data)
-            buf.read_bytes(4)
-            for _ in range(num_versions):
-                buf.read_int()
-            saved = buf.tell()
-            try:
-                buf.read_int(); buf.read_float_min(100.0)
-            except BufferError:
-                buf.seek(saved)
-            images = _read_images(buf)
-            if images:
-                clip_name = os.path.splitext(os.path.basename(bin_path))[0]
-                log.info("Minimal fallback (versions=%d): %d images, 1 synthetic clip.",
-                         num_versions, len(images))
-                return images, [_make_pseudo_clip(clip_name, images)], []
-        except Exception as exc:
-            log.debug("Minimal fallback versions=%d failed: %s", num_versions, exc)
-    log.error("Minimal fallback: no images found.")
-    return None, None, None

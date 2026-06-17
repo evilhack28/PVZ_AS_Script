@@ -1,5 +1,5 @@
 """
-Export methods (GIF / sprite / atlas / JSON / XFL).  Mixin for Player.
+Export methods (GIF / sprite / atlas / JSON).  Mixin for Player.
 """
 
 import logging
@@ -36,11 +36,10 @@ class ExportMixin:
         last_frame = max(0, len(mc['frames']) - 1)
         a_start, a_end = self._clamp_action_range(action, last_frame)
 
-        meta_cfg   = self._meta_for_action(action)
         frame_rate = self._resolve_fps(action, mc)
         dur_ms     = max(1, int(1000 / frame_rate))
         print(f"Exporting '{action['name']}' ({a_end - a_start + 1} frames)...")
-        frames_to_save = self._render_gif_frames(mc_idx, a_start, a_end, meta_cfg)
+        frames_to_save = self._render_gif_frames(mc_idx, a_start, a_end)
         if not frames_to_save:
             return
 
@@ -74,8 +73,7 @@ class ExportMixin:
             last_frame = max(0, len(mc['frames']) - 1)
             a_start, _ = self._clamp_action_range(action, last_frame)
             fb = BoundingBox()
-            self._render(mc_idx, a_start, fb, a_start, last_frame,
-                         self._meta_for_action(action))
+            self._render(mc_idx, a_start, fb, a_start, last_frame)
 
         for idx, act in enumerate(self.playlist):
             mc_idx = act['mc_idx']
@@ -86,7 +84,6 @@ class ExportMixin:
             last_frame = max(0, len(mc['frames']) - 1)
             a_start, a_end = self._clamp_action_range(act, last_frame)
             n_frames   = a_end - a_start + 1
-            meta_cfg   = self._meta_for_action(act)
 
             frame_rate = self._resolve_fps(act, mc)
             dur_ms     = max(1, int(1000 / frame_rate))
@@ -94,10 +91,10 @@ class ExportMixin:
             self._gif_msg = f"Exporting {idx + 1}/{total}:  {act['name']}  ({n_frames} frames)"
             self._gif_msg_ttl = 999999
             fb = BoundingBox()
-            self._render(mc_idx, a_start, fb, a_start, a_end, meta_cfg)
+            self._render(mc_idx, a_start, fb, a_start, a_end)
             pygame.event.pump()
 
-            frames_to_save = self._render_gif_frames(mc_idx, a_start, a_end, meta_cfg)
+            frames_to_save = self._render_gif_frames(mc_idx, a_start, a_end)
             if not frames_to_save:
                 continue
 
@@ -132,8 +129,7 @@ class ExportMixin:
             last_frame = max(0, len(mc['frames']) - 1)
             a_start, _ = self._clamp_action_range(action, last_frame)
             fb = BoundingBox()
-            self._render(mc_idx, a_start, fb, a_start, last_frame,
-                         self._meta_for_action(action))
+            self._render(mc_idx, a_start, fb, a_start, last_frame)
 
         for idx, act in enumerate(self.playlist):
             mc_idx = act['mc_idx']
@@ -144,7 +140,6 @@ class ExportMixin:
             last_frame = max(0, len(mc['frames']) - 1)
             a_start, a_end = self._clamp_action_range(act, last_frame)
             n_frames   = a_end - a_start + 1
-            meta_cfg   = self._meta_for_action(act)
 
             frame_rate = self._resolve_fps(act, mc)
             dur_ms     = max(1, int(1000 / frame_rate))
@@ -152,10 +147,10 @@ class ExportMixin:
             self._gif_msg = f"Exporting {idx + 1}/{total}:  {act['name']}  ({n_frames} frames)"
             self._gif_msg_ttl = 999999
             fb = BoundingBox()
-            self._render(mc_idx, a_start, fb, a_start, a_end, meta_cfg)
+            self._render(mc_idx, a_start, fb, a_start, a_end)
             pygame.event.pump()
 
-            frames_to_save = self._render_gif_frames(mc_idx, a_start, a_end, meta_cfg,
+            frames_to_save = self._render_gif_frames(mc_idx, a_start, a_end,
                                                      transparent=True)
             if not frames_to_save:
                 continue
@@ -176,16 +171,14 @@ class ExportMixin:
     # ── Shared GIF frame renderer ─────────────────────────────────────────────
 
     def _render_gif_frames(self, mc_idx: int, a_start: int, a_end: int,
-                           meta_cfg=None, transparent: bool = False) -> list:
-        # Pass 1: dry-run to find the union bounding box
-        # so we know the tight crop region before allocating the real canvas.
-        PROBE = 4096
+                           transparent: bool = False) -> list:
+        # Pass 1: dry-run to find the union bounding box so we know the tight
+        # crop region before allocating the real canvas. 2048² (16 MB) is
+        # plenty for the characters here and avoids the 67 MB / export cost
+        # of a 4096² probe.
+        PROBE = 2048
         cx, cy = PROBE // 2, PROBE // 2
-
-        if meta_cfg is not None:
-            base = self._base_transform(PROBE, PROBE, meta_cfg)
-        else:
-            base = (1.0, 0.0, 0.0, -1.0, float(cx), float(cy))
+        base = (1.0, 0.0, 0.0, -1.0, float(cx), float(cy))
 
         probe_surf = pygame.Surface((PROBE, PROBE))
         union_box  = BoundingBox()
@@ -307,7 +300,7 @@ class ExportMixin:
         print(msg); log.info(msg)
         self._gif_msg = f"Exported {saved} sprites  ->  {out_dir}";  self._gif_msg_ttl = 180
 
-    # ── Frame dump (JSON export for debugging / XFL pipeline) ─────────────────
+    # ── Frame dump (JSON export for debugging / external pipelines) ───────────
 
     def _dump_frames_json(self) -> None:
         """
@@ -459,10 +452,9 @@ class ExportMixin:
             last_frame = max(0, len(mc['frames']) - 1)
             a_start, a_end = self._clamp_action_range(action, last_frame)
 
-            meta_cfg = self._meta_for_action(action)
-            base = self._base_transform(0, 0, meta_cfg)
-            # Use 0,0 origin (XFL handles positioning itself) but keep scale/flip
-            a, b, c, d, tx, ty = base
+            base = self._base_transform(0, 0)
+            # Use 0,0 origin (downstream tools handle positioning) but keep scale/flip
+            a, b, c, d, _tx, _ty = base
             base_for_dump = (a, b, c, d, 0.0, 0.0)
 
             frames_out = []
@@ -476,13 +468,7 @@ class ExportMixin:
                 "frame_start": a_start,
                 "frame_end":   a_end,
                 "fps":         self._resolve_fps(action, mc),
-                "meta": {
-                    "scale":    meta_cfg.scale    if meta_cfg else 1.0,
-                    "offset_x": meta_cfg.offset_x if meta_cfg else 0.0,
-                    "offset_y": meta_cfg.offset_y if meta_cfg else 0.0,
-                    "flip":     meta_cfg.flip      if meta_cfg else False,
-                } if meta_cfg else None,
-                "frames": frames_out,
+                "frames":      frames_out,
             })
 
         output = {"images": images_out, "actions": actions_out}
@@ -493,76 +479,6 @@ class ExportMixin:
         print(msg)
         self._gif_msg     = msg
         self._gif_msg_ttl = 300
-
-    def _export_xfl_now(self) -> None:
-        """Export the whole character as an Adobe Animate XFL project + .fla zip."""
-        if PilImage is None:
-            print("XFL export requires Pillow:  pip install Pillow")
-            self._gif_msg = "XFL needs Pillow: pip install Pillow"
-            self._gif_msg_ttl = 180
-            return
-
-        try:
-            from xfl_exporter import export_xfl
-        except ImportError:
-            print("XFL export requires xfl_exporter to be importable")
-            self._gif_msg = "Missing xfl_exporter"
-            self._gif_msg_ttl = 180
-            return
-
-        # Write a temporary atlas PNG from the current texture surface
-        tw  = self.renderer.texture.get_width()
-        th  = self.renderer.texture.get_height()
-        raw = pygame.image.tostring(self.renderer.texture, "RGBA")
-        atlas_pil = PilImage.frombytes("RGBA", (tw, th), raw)
-        os.makedirs(self.cfg.output_dir, exist_ok=True)
-        tmp_atlas = os.path.join(self.cfg.output_dir, f"_tmp_atlas_{self.cfg.pvr_name}.png")
-        atlas_pil.save(tmp_atlas, "PNG")
-
-        stem    = self.cfg.pvr_name
-        out_dir = self.cfg.output_dir
-
-        # Derive FPS from the first action's MC
-        fps = 24
-        if self.playlist:
-            first_act = self.playlist[0]
-            midx = first_act.get("mc_idx", -1)
-            if 0 <= midx < len(self.movie_clips):
-                fps = self.movie_clips[midx].get("frame_rate", 24) or 24
-
-        print(f"Exporting XFL: {stem}.xfl  (fps={fps}) ...")
-        self._gif_msg     = f"Exporting XFL: {stem}.xfl ..."
-        self._gif_msg_ttl = 999999
-        pygame.event.pump()
-
-        try:
-            xfl_path = export_xfl(
-                images      = self.images,
-                movie_clips = self.movie_clips,
-                actions     = self.playlist,
-                texture_png = tmp_atlas,
-                out_dir     = out_dir,
-                stem        = stem,
-                fps         = fps,
-                rawbin      = self.renderer.rawbin,
-                anim_meta   = self.anim_meta,
-                define_key  = self.define_key,
-            )
-            fla_path = xfl_path.replace(".xfl", ".fla")
-            msg = f"XFL saved -> {xfl_path}  (.fla: {fla_path})"
-            print(msg); log.info(msg)
-            self._gif_msg     = f"XFL -> {stem}.fla"
-            self._gif_msg_ttl = 300
-        except Exception as exc:
-            log.error("XFL export failed: %s", exc)
-            print(f"XFL export failed: {exc}")
-            self._gif_msg     = f"XFL FAILED: {exc}"
-            self._gif_msg_ttl = 300
-        finally:
-            try:
-                os.remove(tmp_atlas)
-            except OSError:
-                pass
 
     # ── Fast GIF save ─────────────────────────────────────────────────────────
 
@@ -600,18 +516,33 @@ class ExportMixin:
             pal_img.putpalette(palette)
 
             TRANS = 255
+            # Vectorise the alpha→transparent-index step. Numpy when available
+            # turns a per-pixel Python loop (one of the two hot paths in GIF
+            # export — the other is Pillow's quantise) into one C-level mask
+            # write. Bytes fallback uses bytes.translate which is also C-level.
+            try:
+                import numpy as np
+                _have_np = True
+            except ImportError:
+                _have_np = False
+
             pal_frames = []
             for f in frames:
                 alpha = f.getchannel("A")
                 bg    = PilImage.new("RGB", (w, h), (255, 255, 255))
                 bg.paste(f.convert("RGB"), mask=alpha)
                 p = bg.quantize(palette=pal_img, dither=0)
-                p_bytes = bytearray(p.tobytes())
-                a_bytes = alpha.tobytes()
-                for k in range(len(p_bytes)):
-                    if a_bytes[k] < 128:
-                        p_bytes[k] = TRANS
-                result = PilImage.frombytes("P", (w, h), bytes(p_bytes))
+                if _have_np:
+                    p_arr = np.frombuffer(p.tobytes(), dtype=np.uint8).copy()
+                    a_arr = np.frombuffer(alpha.tobytes(), dtype=np.uint8)
+                    p_arr[a_arr < 128] = TRANS
+                    result = PilImage.frombytes("P", (w, h), p_arr.tobytes())
+                else:
+                    # Build an alpha→0/255 mask and OR it onto the palette
+                    # bytes — translate maps "low alpha" pixels to TRANS.
+                    mask = bytes(255 if b < 128 else 0 for b in alpha.tobytes())
+                    p_bytes = bytes(pb | mb for pb, mb in zip(p.tobytes(), mask))
+                    result = PilImage.frombytes("P", (w, h), p_bytes)
                 result.putpalette(palette)
                 pal_frames.append(result)
 
