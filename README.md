@@ -1,163 +1,140 @@
 # PVZ_AS_Script
 
-A Python tool for **reading and playing Cocos2d-x FBIN / RawBin animation files** from *Plants vs. Zombies* (and other Cocos2d-x games that use the same format).
+Read, play, and re-export *Plants vs. Zombies* animation files (Cocos2d-x **FBIN** and **RawBin**).
 
-The current build is intentionally minimal: it decodes the PVR texture, parses the .bin animation, and plays it in a pygame window. The XFL exporter is gone and will be rewritten separately.
+Three entry points:
 
----
-
-## Supported formats
-
-| Format | Magic | Notes |
-|---|---|---|
-| **FBIN** | `FBIN` at offset 0 | Newer PvZ format. Parser tries 4 variants and auto-detects. |
-| **RawBin** | none (legacy) | Older PvZ format. Parser probes offsets 0/12 and 4/6-byte clip headers. |
-
-The PVR loader handles **iOS PVR v2** (RGBA4444 / RGBA8888 / PVRTC4) directly and falls back to **Dreamcast/Naomi PVRT** via the bundled `pypvr` decoder.
+| Script | What it does |
+|---|---|
+| `main.py` | Pygame player. Opens a `.bin` + atlas in a window. |
+| `tools/convert_to_package.py` | `.bin + atlas` → Flash CS5 `.package` (XFL project). |
+| `tools/convert_from_package.py` | `.package` → `.bin + .pvr`. Round-trip back into a playable / game-loadable pair. |
 
 ---
 
 ## Install
 
-Requires **Python 3.8+**.
+Python 3.8+
 
 ```bash
 pip install pygame numpy Pillow
 ```
 
-- `pygame` — required (window + rendering).
-- `numpy` — optional, speeds up PVRTC4 texture decode.
-- `Pillow` — optional, needed for GIF / atlas / sprite export.
-
 ---
 
-## Run
+## Play
 
 ```bash
-# Interactive — pops up file pickers for both
+# pick files in a dialog
 python main.py
 
-# Both files explicit
-python main.py --bin samples/zombie_kungfu_torch.bin --pvr samples/zombie_kungfu_torch.pvr
+# or pass them
+python main.py --bin samples/char.bin --pvr samples/char.pvr
 
-# Half-explicit — the sibling is auto-paired by matching stem in the same folder
-python main.py --bin samples/zombie_kungfu_torch.bin     # finds zombie_kungfu_torch.pvr
-python main.py --pvr samples/zombie_kungfu_torch.pvr     # finds zombie_kungfu_torch.bin
+# or pass one and the sibling (same stem) auto-pairs
+python main.py --bin samples/char.bin
 ```
 
-If only one of `--bin` / `--pvr` is given, the script looks next to that file for a sibling with the same stem and the matching extension. If the sibling is missing (or both flags are omitted), a tkinter file dialog opens for whatever is still unresolved.
+Atlas can be `.pvr` OR `.png` — the loader sniffs the file.
 
----
-
-## In-player keyboard controls
+### Keys
 
 | Key | Action |
 |---|---|
-| `ESC` / `Q` | Quit |
-| `←` / `→` | Previous / next action |
-| `↑` / `↓` | Speed +0.1× / -0.1× |
-| `SPACE` | Pause / resume |
-| `N` / `B` | Step one frame forward / back (auto-pauses) |
-| `F` | Jump to frame (type number, Enter) |
+| `←` `→` | Previous / next action |
+| `↑` `↓` | Speed +/- 0.1× |
+| `Space` | Pause |
+| `N` `B` | Step one frame forward / back |
+| `F` | Jump to frame |
 | `L` | Toggle loop |
-| `I` | Open action picker |
-| `K` | Toggle "butter" sprite (hides the head accessory on kungfu zombies) |
-| `1` / `2` | Set fps mode: source / custom |
-| `4` | Enter a custom fps value |
-| `G` | Export current action to GIF |
-| `A` | Export all actions as GIFs |
-| `Z` | Export all actions as transparent-background GIFs |
-| `S` | Export individual sprite PNGs |
-| `T` | Export atlas as PNG |
-| `J` | Dump frame data as JSON |
-| `H` | Toggle HUD |
-| `?` | Toggle full help overlay |
-| `0` | Reset zoom and pan |
-| `F11` | Toggle fullscreen |
-| `PrtScr` | Save PNG screenshot of the current frame |
-| Mouse wheel | Zoom in / out |
-| Right-drag | Pan canvas |
-| Left-click scrub bar | Seek (drag to scrub) |
+| `I` | Action picker |
+| `K` | Hide `butter` accessory (kungfu zombies) |
+| `C` | Cycle costumes (plants with `custom_NN_*` variants) |
+| `G` / `A` / `Z` | Export current / all / all-no-bg as GIF |
+| `S` / `T` / `J` | Export sprites / atlas / frame JSON |
+| `H` / `?` | HUD / full help |
+| Mouse wheel | Zoom |
+| Right-drag | Pan |
+| Click scrub bar | Seek |
+| `F11` | Fullscreen |
+| `Esc` / `Q` | Quit |
+
+---
+
+## Convert `.bin` → `.package`
+
+```bash
+# one character (emits Foo_4.package + Foo_5.package by default)
+python tools/convert_to_package.py --bin samples/char.bin --pvr samples/char.pvr
+
+# group package — multiple bins under one subgroup
+python tools/convert_to_package.py --group ZombieKungfuGroup \
+    --bin samples/zombie_kungfu_basic.bin \
+    --bin samples/zombie_kungfu_flag.bin
+```
+
+**Auto-routing** by filename:
+
+| Stem contains | Folder |
+|---|---|
+| `zombie` | `images/initial/zombie/<stem>` |
+| `plant` | `images/initial/plant/<stem>` |
+| none of the above | `images/initial/<stem>` |
+
+**Effects**: in `--group` mode, any bin whose stem extends another bin's stem with `_` is treated as an effect of that bin and routed to `images/initial/effects/`. So `zombie_foo.bin` + `zombie_foo_bullet.bin` → one zombie + one effect (works for any suffix word: `_bullet`, `_re`, `_attack`, `_fire`, anything).
+
+**Useful flags**: `--version 4|5|both` (default `both`), `--resolution 768|1536` (default `1536`).
+
+Open the project in Animate CS5 via `<package>/.../main.xfl`.
+
+---
+
+## Convert `.package` → `.bin + .pvr`
+
+```bash
+# any .package (single character or group — group fans out per character)
+python tools/convert_from_package.py --package samples/Foo_5.package --out samples/test/
+
+# or point at an XFL folder directly (the one containing main.xfl)
+python tools/convert_from_package.py --package samples/Foo_5.package/resource/images/initial/foo --out samples/test/
+```
+
+Output: `<stem>.bin` (RawBin, 4-byte clip header — game-loadable) + `<stem>.pvr` (iOS PVR v2, RGBA8888).
+
+Play it back in `main.py` to verify.
 
 ---
 
 ## Importable API
 
 ```python
-from fbin_parser import parse_binary             # dict-shaped: format/info/images/movie_clips/actions
-from pvr_loader  import load_pvr_texture          # PVR -> pygame.Surface
-from pvr_loader  import convert_pvr_to_png        # PVR -> PNG on disk
+from fbin_parser import parse_binary           # dict: format/images/movie_clips/actions/is_rawbin
+from pvr_loader  import load_pvr_texture       # PVR -> pygame.Surface
+from pvr_loader  import convert_pvr_to_png     # PVR -> PNG on disk
 ```
 
 ---
 
-## Project layout
+## Layout
 
 ```
 PVZ_AS_Script/
-├── _paths.py        registers library subfolders on sys.path
-├── main.py          sole entry point — CLI + run_player(bin, pvr)
-├── parsers/         fbin_parser (parse_fbin + parse_binary), rawbin_parser, input_buffer
-├── render/          renderer + player/ subpackage (core, hud, input, export)
-├── pvr/             pvr_loader (load_pvr_texture + convert_pvr_to_png), pypvr
-└── samples/         example .bin / .pvr files
+├── main.py                 player entry point
+├── _paths.py               sys.path setup for library subfolders
+├── tools/
+│   ├── convert_to_package.py     .bin -> .package
+│   ├── convert_from_package.py   .package -> .bin + .pvr
+│   └── bin_diff.py               compare two .bin files structurally
+├── parsers/                FBIN + RawBin parsers
+├── render/                 renderer + player subpackage
+├── pvr/                    PVR/PVRTC texture loader
+└── samples/                example .bin / .pvr pairs
 ```
 
-Imports stay flat (`from fbin_parser import parse_binary`); `main.py` reaches into `_paths.py` to register the library folders before importing project modules.
-
----
-
-## How the pipeline works
-
-```
-  .bin file
-     │
-     ▼
-┌──────────────────────────┐
-│ fbin_parser.parse_fbin() │   ← single entry for both formats
-└──────────────────────────┘
-     │
-     │  FBIN magic at offset 0?
-     │
-     ├── yes ──► tries 4 FBIN variants, picks the one with clean trailing bytes
-     │
-     └── no  ──► rawbin_parser.parse_rawbin_from_bytes()
-                    probes offset 0 or 12, 4-byte or 6-byte clip headers
-     │
-     ▼
-  (images, movie_clips, actions, is_rawbin)
-     │
-     ▼
-  Player (pygame window)
-```
-
-### Shared data contract
-
-```python
-images      # [{name, offset_x, offset_y, width, height, tex_x, tex_y, origin_x, origin_y}, ...]
-movie_clips # [{name, frames: [[element, ...], ...], frame_rate}, ...]
-actions     # [{name, start, end, mc_idx, p4}, ...]
-is_rawbin   # bool
-```
-
-Each frame is a list of `element` dicts:
-
-```python
-{is_mc, id, frame_index, matrix:(sx,ky,kx,sy,tx,ty), alpha, color_mult, color_add}
-```
-
----
-
-## Notes on the format
-
-- **FBIN `offset_x/y`** are Flash registration points — they can legitimately exceed sprite dimensions and must never be clamped.
-- **RawBin** stores absolute world positions; character-level scale / offset is not added on top.
-- The renderer skips sprites at `tex_x=0, tex_y=0` with `size ≤ 4×4` (Flash pivot / registration markers, not real images).
-- PVRTC decoding requires power-of-two textures and wraps blocks (modulo).
-- Some kungfu-zombie samples wear a `butter` sprite over the face — press **`K`** in the player to hide it.
+For implementation notes — format quirks, RawBin element dispatch, matrix conventions, conversion details — see **`CLAUDE.md`**.
 
 ---
 
 ## License
 
-This project is for educational and research purposes. Game assets are property of their respective owners.
+Educational and research use. Game assets belong to their respective owners.

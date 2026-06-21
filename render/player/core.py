@@ -21,6 +21,21 @@ from fbin_parser import DEFAULT_FRAME_RATE
 _CUSTOM_PAT  = re.compile(r'custom', re.IGNORECASE)
 _VARIANT_PAT = re.compile(r'custom[_\W]?(\d+)', re.IGNORECASE)
 
+# Helmet/armor MCs ship as `<family>_<state>` where state ∈
+# {norm, norm_wu, damage_NN, plantfood}. The picker (M key) lists every
+# matching MC as its own checkbox so the user can hide individual
+# helmet states (e.g. show only damage_02 of the cone).
+_HELMET_STATE_PAT = re.compile(
+    r'^(.+?)_(norm_wu|norm|damage_\d+|plantfood)$', re.IGNORECASE)
+_HELMET_STATE_ORDER = {
+    'norm':      0,
+    'norm_wu':   1,
+    'damage_01': 2,
+    'damage_02': 3,
+    'damage_03': 4,
+    'plantfood': 5,
+}
+
 log = logging.getLogger(__name__)
 
 
@@ -88,10 +103,18 @@ class _PlayerCore:
         # whose butter sprite covers the head.
         self.hide_butter = False
 
+        # Helmet picker (M key). Built from MC names matching
+        # `<family>_<state>` where state is norm/damage_NN/plantfood/etc.
+        # User checks/unchecks rows; unchecked names go into
+        # renderer.hidden_parts via _apply_filters().
+        self._init_helmets()
+
         # Costume picker state. C key cycles through self.costume_cycle which
         # is built from MC names containing 'custom' at startup. _apply_costume()
         # pushes the resulting hidden-MC set to the renderer.
         self._init_costumes()
+
+        self._apply_filters()
 
         # Temporary status message shown after GIF export
         self._gif_msg      = ""
@@ -107,10 +130,6 @@ class _PlayerCore:
         self._fps_input_active   = False
         self._fps_input_buf      = ""
 
-        # RawBin auto-centering: cache per mc_idx of (dx, dy) shift
-        self._rawbin_offsets: dict  = {}
-        self._rawbin_center_offset: tuple = (0.0, 0.0)
-
         # View state (zoom/pan/fullscreen/help) — seeded from config, mutated by InputMixin
         self.show_help    = bool(self.cfg.show_help)
         self.fullscreen   = bool(self.cfg.fullscreen)
@@ -125,6 +144,55 @@ class _PlayerCore:
         self._pan_origin = None   # (mouse_x, mouse_y, pan_x_start, pan_y_start) | None
         # Left-button scrub-drag state (True while held inside the scrub bar)
         self._scrub_dragging = False
+
+    # ── Helmet picker ─────────────────────────────────────────────────────────
+
+    def _init_helmets(self) -> None:
+        """Scan MC names for `<family>_<state>` patterns and build a flat
+        ordered list of helmet variants. Each row is a checkbox in the M
+        picker. By default every variant is visible — the user unchecks the
+        states they want hidden (e.g. keep only damage_02 of the cone)."""
+        # family -> list of {mc_idx, mc_name, state}
+        groups: dict = {}
+        for i, mc in enumerate(self.movie_clips):
+            name = mc.get('name', '')
+            if 'armor' not in name.lower():
+                continue
+            m = _HELMET_STATE_PAT.match(name)
+            if not m:
+                continue
+            family = m.group(1)
+            state  = m.group(2).lower()
+            groups.setdefault(family, []).append({
+                'mc_idx':  i,
+                'mc_name': name,
+                'state':   state,
+            })
+
+        rows: list = []
+        for family in sorted(groups.keys()):
+            variants = groups[family]
+            variants.sort(key=lambda v: (_HELMET_STATE_ORDER.get(v['state'], 99),
+                                          v['state']))
+            for v in variants:
+                rows.append({'family': family, **v})
+
+        self.helmet_rows:    list = rows
+        self.helmet_visible: dict = {r['mc_name']: True for r in rows}
+        self.show_helmets:   bool = False
+        self.helmet_sel:     int  = 0
+
+    def _apply_filters(self) -> None:
+        """Push the union of all hidden-name sources to the renderer.
+        Sources: K-key butter toggle + helmet picker unchecks. Substring
+        matching in the renderer means each MC name acts as its own filter."""
+        parts: set = set()
+        if getattr(self, 'hide_butter', False):
+            parts.add('butter')
+        for name, visible in getattr(self, 'helmet_visible', {}).items():
+            if not visible:
+                parts.add(name.lower())
+        self.renderer.hidden_parts = frozenset(parts)
 
     # ── Costume picker ────────────────────────────────────────────────────────
 
@@ -271,46 +339,12 @@ class _PlayerCore:
         cx = screen_w * 0.5
         cy = screen_h * 0.5
         z  = self.zoom
-        ox, oy = self._rawbin_center_offset
+        # Content is pre-centred on the world origin at conversion time (see
+        # convert_from_package._center_actions), so the origin maps straight to
+        # the screen centre and zoom stays anchored on the character.
         return (z, 0.0, 0.0, -z,
-                cx - ox + self.pan_x,
-                cy - oy + self.pan_y)
-
-    def _probe_rawbin_center(self, mc_idx: int,
-                             a_start: int, a_end: int) -> tuple:
-        """
-        Probe the union bounding box of a RawBin action to detect whether the
-        animation content is far off-centre.  If the content centre deviates
-        more than 150 px from the probe canvas centre, return the (dx, dy)
-        shift needed to re-centre it; otherwise return (0, 0).
-        """
-        PROBE = 2048
-        cx    = float(PROBE // 2)
-        cy    = float(PROBE // 2)
-        base  = (1.0, 0.0, 0.0, -1.0, cx, cy)
-
-        probe_surf = pygame.Surface((PROBE, PROBE))
-        union      = BoundingBox()
-
-        for f in range(a_start, a_end + 1):
-            fb = BoundingBox()
-            self.renderer.draw(probe_surf, mc_idx, f, base, fb)
-            if fb.valid:
-                union.expand(pygame.Rect(
-                    int(fb.minx), int(fb.miny),
-                    max(1, int(fb.maxx - fb.minx)),
-                    max(1, int(fb.maxy - fb.miny))))
-
-        del probe_surf
-
-        if union.valid:
-            dx = (union.minx + union.maxx) / 2.0 - cx
-            dy = (union.miny + union.maxy) / 2.0 - cy
-            if abs(dx) > 150 or abs(dy) > 150:
-                log.debug("RawBin auto-centre: shift (%.1f, %.1f) for mc_idx=%d",
-                          dx, dy, mc_idx)
-                return (dx, dy)
-        return (0.0, 0.0)
+                cx + self.pan_x,
+                cy + self.pan_y)
 
     def _resolve_fps(self, action: dict, mc=None) -> int:
         """
@@ -395,15 +429,6 @@ class _PlayerCore:
         mc         = self.movie_clips[mc_idx]
         last_frame = max(0, len(mc['frames']) - 1)
         action_start, action_end = self._clamp_action_range(action, last_frame)
-
-        # RawBin auto-centering: probe action bounds once per mc_idx
-        if self.renderer.rawbin:
-            if mc_idx not in self._rawbin_offsets:
-                self._rawbin_offsets[mc_idx] = self._probe_rawbin_center(
-                    mc_idx, action_start, action_end)
-            self._rawbin_center_offset = self._rawbin_offsets[mc_idx]
-        else:
-            self._rawbin_center_offset = (0.0, 0.0)
 
         frame_rate = self._resolve_fps(action, mc)
         play_loop  = self.loop

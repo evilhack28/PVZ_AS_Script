@@ -67,9 +67,12 @@ _HELP_SECTIONS = [
     ("Filters", [
         ("K",              "Toggle 'butter' (kungfu head sprite)"),
         ("C",              "Cycle costume (all / none / 1 / 2 …)"),
+        ("M",              "Open helmet picker (cone / bucket states)"),
     ]),
     ("Export", [
         ("G / A / Z",      "GIF (current / all / all no-bg)"),
+        ("W",              "WebP (smooth alpha, no GIF jaggies)"),
+        ("V",              "MP4 (needs imageio + ffmpeg)"),
         ("S / T",          "Sprites / atlas PNG"),
         ("J",              "JSON dump"),
     ]),
@@ -149,6 +152,8 @@ class HudMixin:
             self._scrub_bar_rect = None
             if self.show_list:
                 self._draw_action_list()
+            if getattr(self, "show_helmets", False):
+                self._draw_helmet_picker()
             return
 
         # ── Status pill row (top-left) ────────────────────────────────────────
@@ -188,6 +193,22 @@ class HudMixin:
         if getattr(self, "hide_butter", False):
             r = _draw_icon_pill(self.screen, self.font, "BUTTER OFF",
                                 (pill_x, pill_y), _PAL["good"])
+            pill_x = r.right + gap
+
+        # Helmet pill: dim when nothing is filtered, accent when any row is off.
+        helm_rows = getattr(self, "helmet_rows", [])
+        if helm_rows:
+            visible_map = getattr(self, "helmet_visible", {})
+            hidden_n = sum(1 for r in helm_rows
+                           if not visible_map.get(r['mc_name'], True))
+            if hidden_n:
+                label = f"HELMET {len(helm_rows) - hidden_n}/{len(helm_rows)}"
+                col   = _PAL["good"]
+            else:
+                label = f"HELMET ALL"
+                col   = _PAL["pill_dim"]
+            r = _draw_icon_pill(self.screen, self.font, label,
+                                (pill_x, pill_y), col)
             pill_x = r.right + gap
 
         # Show a costume pill whenever the model HAS costume MCs, so the user
@@ -268,6 +289,8 @@ class HudMixin:
 
         if self.show_list:
             self._draw_action_list()
+        if getattr(self, "show_helmets", False):
+            self._draw_helmet_picker()
 
     def _draw_help_overlay(self) -> None:
         """Full-screen darkened backdrop listing every key binding by section."""
@@ -380,5 +403,95 @@ class HudMixin:
 
             mc_surf = self.font.render(f"[{mc_name}]", True, col_mc)
             self.screen.blit(mc_surf, (panel_x + panel_w - mc_surf.get_width() - 10, y + 2))
+
+            y += row_h
+
+    def _draw_helmet_picker(self) -> None:
+        """Checkbox picker for helmet variants. Each row is one armor MC.
+        ENTER/SPACE toggles, A shows all, X hides all, M/ESC closes.
+        Family names (cone/bucket/armor1…) head their groups."""
+        rows = getattr(self, "helmet_rows", [])
+        if not rows:
+            return
+        sw, sh = self.screen.get_size()
+        row_h  = self.cfg.hud_font_size + 5
+
+        # Build visual rows: a family-header row before each new family,
+        # then one row per variant. Headers are not selectable.
+        visual: list = []
+        last_family = None
+        for i, r in enumerate(rows):
+            if r['family'] != last_family:
+                visual.append({'kind': 'header', 'family': r['family']})
+                last_family = r['family']
+            visual.append({'kind': 'item', 'row_idx': i, 'row': r})
+
+        # Selectable row indices (in `visual`) for nearest-row scrolling
+        sel_visual = next(
+            (vi for vi, v in enumerate(visual)
+             if v['kind'] == 'item' and v['row_idx'] == self.helmet_sel),
+            0,
+        )
+
+        max_rows = max(8, (sh - 90) // row_h)
+        visible  = min(len(visual), max_rows)
+
+        # Width: widest checkbox+state label across all variants, plus headers.
+        item_labels = [f"  [x]  {v['row']['state']:<10}  {v['row']['mc_name']}"
+                       for v in visual if v['kind'] == 'item']
+        head_labels = [v['family'] for v in visual if v['kind'] == 'header']
+        widths = [260]
+        widths.extend(self.font.size(lbl)[0]      for lbl in item_labels)
+        widths.extend(self.font_big.size(lbl)[0]  for lbl in head_labels)
+        max_label_w = max(widths)
+        header_text = (f"Helmets ({len(rows)})  UP/DOWN  ENTER  "
+                       f"A=all  X=none  M/ESC")
+        header_w    = self.font_big.size(header_text)[0]
+
+        panel_w = min(sw - 12, max(max_label_w, header_w) + 28)
+        panel_h = visible * row_h + 44
+        panel_x = sw - panel_w - 6
+        panel_y = 6
+
+        panel = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
+        panel.fill(_PAL["bg"])
+        pygame.draw.rect(panel, _PAL["border"], (0, 0, panel_w, panel_h), 1)
+        self.screen.blit(panel, (panel_x, panel_y))
+
+        hsurf = self.font_big.render(header_text, True, _PAL["section"])
+        self.screen.blit(hsurf, (panel_x + 10, panel_y + 8))
+
+        half   = visible // 2
+        scroll = max(0, min(sel_visual - half, len(visual) - visible))
+
+        y = panel_y + 36
+        for vi in range(scroll, min(scroll + visible, len(visual))):
+            v = visual[vi]
+            if v['kind'] == 'header':
+                hd = self.font_big.render(v['family'], True, _PAL["section_dim"])
+                self.screen.blit(hd, (panel_x + 8, y + 1))
+                y += row_h
+                continue
+
+            row    = v['row']
+            is_sel = (v['row_idx'] == self.helmet_sel)
+            is_on  = self.helmet_visible.get(row['mc_name'], True)
+
+            if is_sel:
+                hl = pygame.Surface((panel_w - 4, row_h), pygame.SRCALPHA)
+                hl.fill((45, 95, 200, 190))
+                self.screen.blit(hl, (panel_x + 2, y))
+
+            box     = "[x]" if is_on else "[ ]"
+            col_box = _PAL["good"]      if is_on  else _PAL["pill_dim"]
+            col_lbl = (255, 255, 255)   if is_sel else (
+                      (210, 220, 230)   if is_on  else (140, 145, 160))
+
+            box_surf = self.font.render(box, True, col_box)
+            self.screen.blit(box_surf, (panel_x + 22, y + 2))
+
+            state_surf = self.font.render(row['state'], True, col_lbl)
+            self.screen.blit(state_surf,
+                             (panel_x + 22 + box_surf.get_width() + 10, y + 2))
 
             y += row_h

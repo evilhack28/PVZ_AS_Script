@@ -147,12 +147,47 @@ class InputMixin:
                 self.loop = not self.loop
             return quit_req, anim_active
 
+        if self.show_helmets:
+            n = len(self.helmet_rows)
+            if key in (pygame.K_ESCAPE, pygame.K_m):
+                self.show_helmets = False
+            elif n == 0:
+                pass
+            elif key == pygame.K_UP:
+                self.helmet_sel = (self.helmet_sel - 1) % n
+            elif key == pygame.K_DOWN:
+                self.helmet_sel = (self.helmet_sel + 1) % n
+            elif key in (pygame.K_RETURN, pygame.K_SPACE):
+                row  = self.helmet_rows[self.helmet_sel]
+                name = row['mc_name']
+                self.helmet_visible[name] = not self.helmet_visible.get(name, True)
+                self._apply_filters()
+            elif key == pygame.K_a:
+                for nm in self.helmet_visible:
+                    self.helmet_visible[nm] = True
+                self._apply_filters()
+            elif key == pygame.K_x:
+                for nm in self.helmet_visible:
+                    self.helmet_visible[nm] = False
+                self._apply_filters()
+            return quit_req, anim_active
+
         if key in (pygame.K_ESCAPE, pygame.K_q):
             return True, False
 
         if key == pygame.K_i:
             self.show_list     = True
             self.list_selected = self.current_idx
+            return quit_req, anim_active
+
+        if key == pygame.K_m:
+            if not self.helmet_rows:
+                self._gif_msg     = "No helmet variants on this model"
+                self._gif_msg_ttl = 120
+            else:
+                self.show_helmets = True
+                self.helmet_sel   = max(0, min(self.helmet_sel,
+                                               len(self.helmet_rows) - 1))
             return quit_req, anim_active
 
         if key == pygame.K_RIGHT:
@@ -182,8 +217,7 @@ class InputMixin:
         elif key == pygame.K_k:
             # Toggle hiding the 'butter' sprite (covers the kungfu zombies' face)
             self.hide_butter = not self.hide_butter
-            self.renderer.hidden_parts = (frozenset({'butter'})
-                                          if self.hide_butter else frozenset())
+            self._apply_filters()
             self._gif_msg = f"Butter: {'HIDDEN' if self.hide_butter else 'SHOWN'}"
             self._gif_msg_ttl = 120
         elif key == pygame.K_c:
@@ -215,6 +249,10 @@ class InputMixin:
             self._export_all_gifs()
         elif key == pygame.K_z:
             self._export_all_gifs_nobg()
+        elif key == pygame.K_w:
+            self._export_webp_now()
+        elif key == pygame.K_v:
+            self._export_mp4_now()
         elif key == pygame.K_s:
             self._export_sprites_now()
         elif key == pygame.K_t:

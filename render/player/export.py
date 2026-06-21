@@ -168,6 +168,122 @@ class ExportMixin:
         print(msg); log.info(msg)
         self._gif_msg = msg;  self._gif_msg_ttl = 300
 
+    # ── WebP export (full alpha — fixes GIF's jagged anti-alias edges) ────────
+
+    def _export_webp_now(self) -> None:
+        """Export current action as animated WebP. RGBA, lossless — keeps the
+        same smooth anti-aliased edges the player shows (GIF can't, because it
+        has 1-bit alpha)."""
+        if PilImage is None:
+            print("WebP export requires Pillow:  pip install Pillow")
+            return
+
+        action = self.playlist[self.current_idx]
+        mc_idx = action['mc_idx']
+        if not (0 <= mc_idx < len(self.movie_clips)):
+            return
+
+        mc         = self.movie_clips[mc_idx]
+        last_frame = max(0, len(mc['frames']) - 1)
+        a_start, a_end = self._clamp_action_range(action, last_frame)
+
+        frame_rate = self._resolve_fps(action, mc)
+        dur_ms     = max(1, int(1000 / frame_rate))
+        print(f"Exporting WebP '{action['name']}' "
+              f"({a_end - a_start + 1} frames)...")
+        frames = self._render_gif_frames(mc_idx, a_start, a_end, transparent=True)
+        if not frames:
+            return
+
+        out_dir  = os.path.join(self.cfg.output_dir, self.cfg.pvr_name)
+        os.makedirs(out_dir, exist_ok=True)
+        out_name = os.path.join(out_dir,
+                                f"{self.cfg.pvr_name}_{action['name']}.webp")
+        try:
+            # lossless=True + quality=100 + method=6 → max-quality, max-effort.
+            # method=6 is the slowest encoder setting but produces the
+            # smallest file at full quality.
+            frames[0].save(
+                out_name, save_all=True,
+                append_images=frames[1:],
+                duration=dur_ms, loop=0,
+                lossless=True, quality=100, method=6,
+            )
+            msg = f"Saved {out_name}  ({len(frames)} frames)"
+            print(msg); log.info(msg)
+            self._gif_msg     = f"Saved  {out_name}"
+            self._gif_msg_ttl = 180
+        except Exception as exc:
+            log.error("WebP export failed: %s", exc)
+            self._gif_msg     = f"WebP failed: {exc}"
+            self._gif_msg_ttl = 240
+
+    # ── MP4 export (opaque, needs imageio + ffmpeg) ───────────────────────────
+
+    def _export_mp4_now(self) -> None:
+        """Export current action as H.264 MP4. Opaque (no alpha), but smooth
+        edges and tiny files. Needs `pip install imageio imageio-ffmpeg`."""
+        if PilImage is None:
+            print("MP4 export requires Pillow:  pip install Pillow")
+            return
+        try:
+            import imageio.v2 as iio
+            import numpy as np
+        except ImportError:
+            msg = "MP4 needs:  pip install imageio imageio-ffmpeg numpy"
+            print(msg)
+            self._gif_msg     = msg
+            self._gif_msg_ttl = 300
+            return
+
+        action = self.playlist[self.current_idx]
+        mc_idx = action['mc_idx']
+        if not (0 <= mc_idx < len(self.movie_clips)):
+            return
+
+        mc         = self.movie_clips[mc_idx]
+        last_frame = max(0, len(mc['frames']) - 1)
+        a_start, a_end = self._clamp_action_range(action, last_frame)
+
+        frame_rate = self._resolve_fps(action, mc)
+        print(f"Exporting MP4 '{action['name']}' "
+              f"({a_end - a_start + 1} frames)...")
+        frames = self._render_gif_frames(mc_idx, a_start, a_end, transparent=False)
+        if not frames:
+            return
+
+        # H.264 yuv420p needs even dimensions. Pad on the right/bottom with bg.
+        w, h   = frames[0].size
+        pad_w  = (w + 1) // 2 * 2
+        pad_h  = (h + 1) // 2 * 2
+        needs_pad = (pad_w, pad_h) != (w, h)
+
+        out_dir  = os.path.join(self.cfg.output_dir, self.cfg.pvr_name)
+        os.makedirs(out_dir, exist_ok=True)
+        out_name = os.path.join(out_dir,
+                                f"{self.cfg.pvr_name}_{action['name']}.mp4")
+        try:
+            writer = iio.get_writer(
+                out_name, fps=frame_rate, codec='libx264',
+                pixelformat='yuv420p', quality=8, macro_block_size=2,
+            )
+            for f in frames:
+                if needs_pad:
+                    bg = PilImage.new('RGB', (pad_w, pad_h),
+                                      self.cfg.background_rgb)
+                    bg.paste(f, (0, 0))
+                    f = bg
+                writer.append_data(np.asarray(f))
+            writer.close()
+            msg = f"Saved {out_name}  ({len(frames)} frames)"
+            print(msg); log.info(msg)
+            self._gif_msg     = f"Saved  {out_name}"
+            self._gif_msg_ttl = 180
+        except Exception as exc:
+            log.error("MP4 export failed: %s", exc)
+            self._gif_msg     = f"MP4 failed: {exc}"
+            self._gif_msg_ttl = 240
+
     # ── Shared GIF frame renderer ─────────────────────────────────────────────
 
     def _render_gif_frames(self, mc_idx: int, a_start: int, a_end: int,

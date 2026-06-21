@@ -20,7 +20,7 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import _paths  # noqa: F401
 
 from fbin_parser import parse_binary
