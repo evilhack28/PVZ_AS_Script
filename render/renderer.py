@@ -15,7 +15,7 @@ import pygame
 log = logging.getLogger(__name__)
 
 # ── Constants ────────────────────────────────────────────────────────────────
-MAX_CACHE_SIZE = 2048
+MAX_CACHE_SIZE = 4096
 
 # Lawn-alignment placeholder MCs. In FBIN these draw a thin ground-swatch strip
 # (e.g. `001_105x3`, a band of atlas/padding garbage) scaled tens of times to
@@ -426,10 +426,12 @@ class Renderer:
         scale_x = scale_x_l * bsx
         scale_y = scale_y_l * bsy
 
+        cm = elem.get('color_mult')
+        ca = elem.get('color_add')
         cache_key = (img_idx, round(scale_x, 4), round(scale_y, 4),
-                     round(rotation_deg, 2), flip_y)
+                     round(rotation_deg, 2), flip_y, cm, ca)
         xformed   = self._get_cached(sprite, cache_key, scale_x, scale_y,
-                                     rotation_deg, flip_y)
+                                     rotation_deg, flip_y, cm, ca)
         if xformed is None:
             return
 
@@ -520,6 +522,24 @@ class Renderer:
                                   pygame.image.tostring(sprite, 'RGBA'))
             out = pil.transform((ow, oh), Image.AFFINE, (a, b, c, d, e, f),
                                 resample=Image.BILINEAR)
+            # Apply color transform on the warped result
+            cm = elem.get('color_mult')
+            ca = elem.get('color_add')
+            has_mult = (cm is not None and
+                        (cm[0] != 255 or cm[1] != 255 or cm[2] != 255))
+            has_add  = (ca is not None and
+                        (ca[0] != 0 or ca[1] != 0 or ca[2] != 0))
+            if has_mult or has_add:
+                r, g, b_ch, a_ch = out.split()
+                if has_mult:
+                    r = r.point(bytes(int(i * cm[0] / 255) for i in range(256)))
+                    g = g.point(bytes(int(i * cm[1] / 255) for i in range(256)))
+                    b_ch = b_ch.point(bytes(int(i * cm[2] / 255) for i in range(256)))
+                if has_add:
+                    r = r.point(bytes(min(255, i + ca[0]) for i in range(256)))
+                    g = g.point(bytes(min(255, i + ca[1]) for i in range(256)))
+                    b_ch = b_ch.point(bytes(min(255, i + ca[2]) for i in range(256)))
+                out = Image.merge('RGBA', (r, g, b_ch, a_ch))
             alpha_val = elem.get('alpha', 1.0)
             if alpha_val is not None and alpha_val < 1.0:
                 bands = out.split()
@@ -543,7 +563,8 @@ class Renderer:
 
     def _get_cached(self, sprite: pygame.Surface, key: tuple,
                     scale_x: float, scale_y: float,
-                    rotation_deg: float, flip_y: bool) -> Optional[pygame.Surface]:
+                    rotation_deg: float, flip_y: bool,
+                    color_mult=None, color_add=None) -> Optional[pygame.Surface]:
         if key in self._cache:
             self._cache.move_to_end(key)
             return self._cache[key]
@@ -561,10 +582,79 @@ class Renderer:
             log.debug("Transform failed for key %s: %s", key, exc)
             return None
 
+        has_mult = (color_mult is not None and
+                    (color_mult[0] != 255 or color_mult[1] != 255 or color_mult[2] != 255))
+        has_add  = (color_add is not None and
+                    (color_add[0] != 0 or color_add[1] != 0 or color_add[2] != 0))
+        if has_mult or has_add:
+            rotated = self._apply_color_transform(rotated, color_mult, color_add,
+                                                  has_mult, has_add)
+
         if len(self._cache) >= MAX_CACHE_SIZE:
             self._cache.popitem(last=False)
         self._cache[key] = rotated
         return rotated
+
+    def _apply_color_transform(self, surf: pygame.Surface,
+                               color_mult, color_add,
+                               has_mult: bool, has_add: bool) -> pygame.Surface:
+        """Apply Flash ColorTransform RGB channels.
+        color_mult bytes: (R,G,B,A) unsigned 0-255, 255=identity.
+        color_add  bytes: (R,G,B,A) unsigned 0-255, 0=identity.
+        Returns a new surface with the transform applied.
+        """
+        w, h = surf.get_size()
+        raw = pygame.image.tostring(surf, 'RGBA')  # platform-independent RGBA
+
+        # ── numpy fast path ──────────────────────────────────────────────────
+        try:
+            import numpy as np
+            arr = np.frombuffer(raw, dtype=np.uint8).reshape(h, w, 4).copy()
+
+            if has_mult:
+                mr = color_mult[0]; mg = color_mult[1]; mb = color_mult[2]
+                arr[:, :, 0] = np.clip(
+                    arr[:, :, 0].astype(np.float32) * (mr / 255.0), 0, 255)
+                arr[:, :, 1] = np.clip(
+                    arr[:, :, 1].astype(np.float32) * (mg / 255.0), 0, 255)
+                arr[:, :, 2] = np.clip(
+                    arr[:, :, 2].astype(np.float32) * (mb / 255.0), 0, 255)
+
+            if has_add:
+                ar = color_add[0]; ag = color_add[1]; ab = color_add[2]
+                arr[:, :, 0] = np.clip(arr[:, :, 0].astype(np.int16) + ar, 0, 255)
+                arr[:, :, 1] = np.clip(arr[:, :, 1].astype(np.int16) + ag, 0, 255)
+                arr[:, :, 2] = np.clip(arr[:, :, 2].astype(np.int16) + ab, 0, 255)
+
+            return pygame.image.frombuffer(arr.tobytes(), (w, h), 'RGBA')
+
+        except Exception:
+            pass
+
+        # ── PIL fallback ─────────────────────────────────────────────────────
+        try:
+            from PIL import Image as PILImage
+            pil  = PILImage.frombytes('RGBA', (w, h), raw)
+            r, g, b, a = pil.split()
+
+            if has_mult:
+                mr = color_mult[0]; mg = color_mult[1]; mb = color_mult[2]
+                r = r.point(bytes(int(i * mr / 255) for i in range(256)))
+                g = g.point(bytes(int(i * mg / 255) for i in range(256)))
+                b = b.point(bytes(int(i * mb / 255) for i in range(256)))
+
+            if has_add:
+                ar = color_add[0]; ag = color_add[1]; ab = color_add[2]
+                r = r.point(bytes(min(255, i + ar) for i in range(256)))
+                g = g.point(bytes(min(255, i + ag) for i in range(256)))
+                b = b.point(bytes(min(255, i + ab) for i in range(256)))
+
+            out = PILImage.merge('RGBA', (r, g, b, a))
+            return pygame.image.fromstring(out.tobytes(), (w, h), 'RGBA')
+
+        except Exception as exc:
+            log.debug("Color transform failed: %s", exc)
+            return surf
 
     def clear_cache(self) -> None:
         self._cache.clear()

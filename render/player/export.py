@@ -294,7 +294,11 @@ class ExportMixin:
         # of a 4096² probe.
         PROBE = 2048
         cx, cy = PROBE // 2, PROBE // 2
-        base = (1.0, 0.0, 0.0, -1.0, float(cx), float(cy))
+        # Match the player's current zoom so the exported GIF looks the same
+        # as what the user sees on screen (zoom-wheel in, press G → GIF at
+        # that zoom). Clamped to the same [0.25, 8.0] range as the player.
+        z = max(0.25, min(8.0, getattr(self, 'zoom', 1.0)))
+        base = (z, 0.0, 0.0, -z, float(cx), float(cy))
 
         probe_surf = pygame.Surface((PROBE, PROBE))
         union_box  = BoundingBox()
@@ -476,16 +480,18 @@ class ExportMixin:
                     seen[key] = i
                 elements = [elements[i] for i in sorted(seen.values())]
             else:
-                from collections import Counter
-                counts = Counter(e['id'] for e in elements if not e['is_mc'])
-                if any(c > 1 for c in counts.values()):
-                    seen_img = {}
-                    for i, elem in enumerate(elements):
-                        if not elem['is_mc']:
-                            seen_img[elem['id']] = i
-                    kept = set(seen_img.values())
-                    elements = [e for i, e in enumerate(elements)
-                                if e['is_mc'] or i in kept]
+                # Position-aware dedup matching renderer.py:225-235.
+                # Same image at different positions = legitimate symmetrical
+                # placement (eyes, paired limbs) — both must be kept.
+                seen_img = {}
+                for i, elem in enumerate(elements):
+                    if not elem['is_mc']:
+                        m   = elem['matrix']
+                        key = (elem['id'], round(m[4], 1), round(m[5], 1))
+                        seen_img[key] = i
+                kept = set(seen_img.values())
+                elements = [e for i, e in enumerate(elements)
+                            if e['is_mc'] or i in kept]
 
             results = []
             for elem in elements:
