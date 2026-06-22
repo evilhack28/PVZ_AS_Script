@@ -108,11 +108,12 @@ Key behaviours that span multiple files:
 - **FBIN dedup**: position-aware — same `(image id, round(tx,1), round(ty,1))` collapses to last wins (Flash stale keyframe placements at the *same* spot). Same image id at *different* positions is kept (legitimate symmetrical pairs: left/right pupils, paired eye dots on bellis/Breeder_zombie/bush). Earlier count-only rule killed one eye on every such pair.
 - **RawBin dedup**: suppress identical `(frame_index, tx, ty)` triples per frame.
 - **RawBin plane suppression**: images drawn via `mc_id=0` (ground_swatch_plane) suppress `mc_id=1` draws of the same image.
+- **FBIN ground-swatch skip** (`_GROUND_PLANE_NAMES` = `ground_swatch`, `ground_swatch_plane`, `_ground`): in the FBIN draw path these lawn-alignment placeholder MCs are skipped entirely. They draw a thin ground strip (e.g. `001_105x3`, a band of atlas/padding garbage) that a parent stretches tens of times to mark the tile (`zombie_snai` walk: `ground_swatch` scales `001_105x3` by `sy=43.33` → 105×130 of colored stripes). The game never renders them (the lawn is separate). **FBIN-only** — in RawBin `ground_swatch` is MC[1], used as a dispatch-route redirect that is never recursed into by name, so the skip can't interfere there.
 - **RawBin element dispatch** — `mc_id` (eid) determines how `frame_index` (fi) is interpreted:
   - `mc_id=1` → **always redirect to body-part MC[fi]**. MC[1] is universally a 1-frame redirect-wrapper (named `ground_swatch`, `zombie_imp_pirate_hand1`, etc.) whose fi value is the *target MC index*, not an image index. The target MC then draws its own sub-sprites (e.g. MC[15]=zombie_basic_eye draws image 14).
   - `mc_id≠1` (eid=0 ground, eid=2 image-pointer, etc.) → **draw image fi directly** when fi < len(images). This is the terminal draw for all body-part sub-elements.
 - **Transform cache**: LRU, up to 2048 pre-scaled/rotated surfaces (`_NAME_OVERRIDES` applies hardcoded flip/size corrections for `jaw`, `flag`, `31-031`).
-- **No shear support**: `_draw_image` extracts `(scale_x, scale_y, rotation, flip_y)` from the cumulative matrix and uses `pygame.transform.scale` + `pygame.transform.rotate`. Genuine 2D shear (matrices where the X-axis and Y-axis are rotated by different angles — common in Flash walk cycles for limb bending) is silently dropped: the limb renders as a rigid rotated rectangle instead of bending. This is a known limitation; a PIL-based affine path was attempted and reverted because it regressed other content.
+- **Shear: guarded affine path**. `_draw_image`'s fast path extracts `(scale_x, scale_y, rotation, flip_y)` from the cumulative matrix and uses `pygame.transform.scale` + `pygame.transform.rotate`, which **drops 2D shear** (matrices where the X- and Y-axes rotate by different angles — Flash walk-cycle limb bends, attack motion-smear trails). When the cumulative matrix shears the axes by more than `_SHEAR_AFFINE_DEG` (5°, via `_affine_shear_deg`), `_draw_image_affine` warps the true parallelogram with a PIL affine instead (texture→screen linear map `A=[[na,-nc],[nb,-nd]]`, warped about the sprite centre and blitted so the centre lands at the same `(wcx,wcy)` as the fast path). Below the threshold the fast path is visually identical and stays in use — that guard is why this doesn't regress no-shear content (an earlier *unconditional* PIL path did). Falls back to the fast path if PIL is missing or the matrix is degenerate. Example: `zombie_snai` `attack3` has faint low-alpha sheared jaw-bitmap smear trails that rendered as rigid floating jaws before this.
 - **Alpha is leaf-only**: `_draw_image()` reads `elem['alpha']` from the leaf image element. Alpha set on an `is_mc=True` parent is NOT propagated to children. (Known limitation — relevant when a transparency effect is authored on a MovieClip instance rather than a leaf image, e.g. `zombie_kungfu_hammer`.)
 
 ### Player
@@ -184,9 +185,16 @@ python tools/convert_to_package.py --bin char.bin --pvr char.pvr
 # group bundle — single top-level subgroup with multiple resources
 python tools/convert_to_package.py --group ZombieKungfuGroup \
     --bin zombie_kungfu_basic.bin --bin zombie_kungfu_flag.bin
+
+# auto-group — a lone --bin auto-bundles its `<stem>_*.bin` siblings
+python tools/convert_to_package.py --bin zombie_slingshot.bin
+#   folder also has zombie_slingshot_bullet.bin + zombie_slingshot_re.bin
+#   -> ZombieSlingshotGroup_{4,5}.package (base in zombie/, the two in effects/)
 ```
 
 `--bin`/`--pvr` are repeatable; sibling `.pvr` auto-pairs when `--pvr` is omitted. `--resolution` defaults to `1536` (matches every reference package: PlantPeashooter, ZombieTutorialGroup, ZombieEgyptTombRaiserGroup); pass `768` for SD.
+
+**Auto-grouping** (`_discover_group_siblings`): a single `--bin` whose folder also holds `<stem>_*.bin` files (the character's effects/variants) is bundled into one `<Stem>Group.package` automatically — matching how real PvZ packages ship a zombie with its effects. The siblings reuse the group effect-detection (any stem extending another with `_` → `effects/`). Skipped when the user is explicit (`--group`, `--pvr`, `--subgroup`/`--char-name`/`--id-prefix`) or passes `--no-auto-group`. If no siblings exist (e.g. an iOS dump with only the base bin), it falls back to a single-character package.
 
 ### Path / ID routing (`_derive_defaults`)
 
@@ -219,7 +227,7 @@ Empty `type_path` drops the category subfolder: `images/initial/<stem>`. The Pop
 
 ### Hard-learned constraints
 
-- **Action `start`/`end` are GLOBAL playlist indices, not local MC frame ranges.** `_clamp_action_range`-style heuristic: if `raw_start > last_frame`, or `duration > last_frame`, or `raw_start > 0 and duration >= last_frame` → use the full MC range `(0, last_frame)`. The naïve `min(start, last_frame)` clamp produced single-frame labels for everything after `idle` (e.g. `attack` collapsed to 1 frame for applemortar_3).
+- **Action `start`/`end` are GLOBAL playlist indices, not local MC frame ranges.** `_clamp_action_range`-style heuristic: if `raw_start > last_frame`, `raw_end > last_frame`, `duration > last_frame`, or `raw_start > 0 and duration >= last_frame` → use the full MC range `(0, last_frame)`. The naïve `min(start, last_frame)` clamp produced single-frame labels for everything after `idle` (e.g. `attack` collapsed to 1 frame for applemortar_3). The `raw_end > last_frame` term is essential for a **walk whose global span is shorter than its MC** (e.g. `zombie_primitive` walk: `start=63 end=127 last_frame=69` → `duration 64 < 69`; the duration-only checks miss it and play only frames 63-69 of the 70-frame cycle). Both the player (`_clamp_action_range`) and the exporter carry the identical heuristic.
 - **Image symbol matrix sign**: `tx=+offset_x, ty=+offset_y`. Working PlantPeashooter reference uses negative tx/ty because its source offsets are positive; ours can be negative (applemortar IMG[3] `ox=-49.2`), and the sign must match the renderer's geometry.
 - **No duplicate `<DOMFrame index="N">` within one `<DOMLayer>`** — Flash CS5 crashes. The action layer's 1-frame label edge case must emit only the stop keyframe.
 - **No symbol cycles** — `sprite/X` containing `libraryItemName="sprite/X"` crashes Flash CS5. Always validate with a cycle scan after rebuilding.

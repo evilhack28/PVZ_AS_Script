@@ -872,7 +872,12 @@ def _write_character_assets(out_dir: Path, parsed: dict, atlas,
         raw_start = a.get('start', 0)
         raw_end   = a.get('end', last_frame)
         duration  = raw_end - raw_start
+        # `raw_end > last_frame` catches a global action whose duration is
+        # shorter than its MC (e.g. zombie_primitive walk: start=63 end=127
+        # last_frame=69) — the duration-only checks miss it and the label would
+        # otherwise collapse to frames 63-69 instead of the full 70-frame walk.
         is_global = (raw_start > last_frame
+                     or raw_end > last_frame
                      or duration > last_frame
                      or (raw_start > 0 and duration >= last_frame))
         if is_global:
@@ -1170,6 +1175,29 @@ def _resolve_atlas(bin_path: Path) -> Path:
         f"Could not auto-pair atlas next to '{bin_path}'. Use --pvr.")
 
 
+def _pascal_stem(stem: str) -> str:
+    """PascalCase a bin stem (e.g. 'zombie_slingshot' -> 'ZombieSlingshot')."""
+    return ''.join(w.capitalize() for w in re.split(r'[_\W]+', stem) if w)
+
+
+def _discover_group_siblings(bin_path: Path) -> list:
+    """Find sibling `.bin` files in the same folder that belong to the same
+    character group — those whose stem starts with `<stem>_` (the base's
+    effects / variants, e.g. `zombie_slingshot_bullet`, `zombie_slingshot_re`).
+    Each must have a pairable atlas (.pvr/.png) next to it. Returned sorted."""
+    base = bin_path.stem
+    base_resolved = bin_path.resolve()
+    sibs = []
+    for cand in sorted(bin_path.parent.glob('*.bin')):
+        if cand.resolve() == base_resolved:
+            continue
+        if not cand.stem.startswith(base + '_'):
+            continue
+        if any(cand.with_suffix(suf).exists() for suf in ('.pvr', '.png')):
+            sibs.append(cand)
+    return sibs
+
+
 def main():
     p = argparse.ArgumentParser(
         description="Convert one or more FBIN/RawBin .bin + atlas pairs to PvZ "
@@ -1186,6 +1214,11 @@ def main():
                                    "with this subgroup name (e.g. "
                                    "'ZombieKungfuGroup'). Without --group each "
                                    "--bin produces its own package.")
+    p.add_argument("--no-auto-group", action='store_true',
+                   help="Disable auto-grouping. By default, a single --bin "
+                        "whose folder also holds `<stem>_*.bin` siblings (its "
+                        "effects/variants) is bundled into one "
+                        "'<Stem>Group.package' automatically.")
     p.add_argument("--version", choices=("4", "5", "both"), default="both",
                    help="Package format layout (default: both)")
     p.add_argument("--resolution", type=int, default=1536,
@@ -1207,6 +1240,23 @@ def main():
     for bp in bin_paths:
         if not bp.exists():
             print(f"Error: no such file '{bp}'"); sys.exit(1)
+
+    # Auto-group: a lone --bin whose folder holds `<stem>_*.bin` siblings (the
+    # character's effects/variants) is bundled into one '<Stem>Group.package',
+    # matching how the real PvZ packages ship (zombie + its effects together).
+    # Only kicks in when the user isn't already being explicit (no --group, no
+    # --pvr, no single-char overrides) and didn't pass --no-auto-group.
+    if (len(bin_paths) == 1 and not args.group and not args.no_auto_group
+            and not args.pvr and not args.subgroup
+            and not args.char_name and not args.id_prefix):
+        sibs = _discover_group_siblings(bin_paths[0])
+        if sibs:
+            args.group = _pascal_stem(bin_paths[0].stem) + "Group"
+            print(f"Auto-group: '{bin_paths[0].stem}' has {len(sibs)} sibling "
+                  f"bin(s) -> bundling as {args.group}")
+            for s in sibs:
+                print(f"    + {s.stem}")
+            bin_paths += [s.resolve() for s in sibs]
 
     if args.pvr:
         if len(args.pvr) != len(bin_paths):

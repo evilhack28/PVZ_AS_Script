@@ -17,6 +17,36 @@ log = logging.getLogger(__name__)
 # ── Constants ────────────────────────────────────────────────────────────────
 MAX_CACHE_SIZE = 2048
 
+# Lawn-alignment placeholder MCs. In FBIN these draw a thin ground-swatch strip
+# (e.g. `001_105x3`, a band of atlas/padding garbage) scaled tens of times to
+# cover a tile — the game never renders them (the lawn is drawn separately), so
+# neither should we. Skipped only in the FBIN draw path: in RawBin `ground_swatch`
+# is MC[1], used as a dispatch-route redirect (never recursed into by name), so
+# this never interferes there.
+_GROUND_PLANE_NAMES = frozenset({'ground_swatch', 'ground_swatch_plane', '_ground'})
+
+# Sprites whose cumulative matrix shears the axes by more than this many degrees
+# take the slower PIL affine path (true parallelogram warp) instead of the fast
+# scale+rotate path, which can only produce rigid rotated rectangles. Below the
+# threshold the fast path is visually identical and stays in use, so the common
+# no-shear case is untouched (this guard is why the affine path doesn't regress
+# normal content the way an unconditional one did). Catches Flash walk-cycle
+# limb bends and attack motion-smear trails (e.g. zombie_snai attack3, whose
+# faint sheared jaw-bitmap smears render as rigid floating jaws without it).
+_SHEAR_AFFINE_DEG = 5.0
+
+
+def _affine_shear_deg(na: float, nb: float, nc: float, nd: float) -> float:
+    """Degrees the matrix's two axes deviate from orthogonal (0 = no shear).
+    Computed on the cumulative matrix — uniform zoom and the screen Y-flip both
+    preserve the inter-axis angle, so no base-stripping is needed."""
+    m0 = math.hypot(na, nb)
+    m1 = math.hypot(nc, nd)
+    if m0 < 1e-9 or m1 < 1e-9:
+        return 0.0
+    cos_ang = max(-1.0, min(1.0, (na * nc + nb * nd) / (m0 * m1)))
+    return abs(math.degrees(math.acos(cos_ang)) - 90.0)
+
 
 # ── Bounding box ─────────────────────────────────────────────────────────────
 
@@ -287,6 +317,11 @@ class Renderer:
                                   (na, nb, nc, nd, ntx, nty),
                                   bounds, _depth + 1, _visited)
                 else:
+                    # Skip lawn-alignment placeholder MCs (ground_swatch): a
+                    # garbage strip the source stretches tens of times to mark
+                    # the tile, which the game never draws (FBIN path only).
+                    if str(child_mc.get('name', '')).lower() in _GROUND_PLANE_NAMES:
+                        continue
                     next_frame = child_frame if child_frame >= 0 else frame_num
                     self.draw(surface, eid, next_frame,
                               (na, nb, nc, nd, ntx, nty),
@@ -344,6 +379,16 @@ class Renderer:
             return
 
         na, nb, nc, nd, ntx, nty = matrix
+
+        # ── Guarded affine path for sheared sprites ──────────────────────────
+        # The fast path below drops 2D shear (renders limbs/smears as rigid
+        # rotated rectangles). For significantly sheared sprites, warp the real
+        # parallelogram via PIL instead. Falls through to the fast path if the
+        # warp can't run (PIL missing / degenerate matrix).
+        if _affine_shear_deg(na, nb, nc, nd) > _SHEAR_AFFINE_DEG:
+            if self._draw_image_affine(surface, sprite, img_def,
+                                       matrix, elem, bounds):
+                return
 
         # Intermediate MCs often carry the actual scale/rotation while the leaf
         # element matrix is identity (RawBin: eid=1 → MC[fi] redirect; FBIN:
@@ -409,6 +454,90 @@ class Renderer:
 
         if bounds is not None:
             bounds.expand(r_rect)
+
+    # ── Affine (shear) path ───────────────────────────────────────────────────
+
+    def _draw_image_affine(self, surface: pygame.Surface,
+                           sprite: pygame.Surface, img_def: dict,
+                           matrix: tuple, elem: dict,
+                           bounds: Optional[BoundingBox]) -> bool:
+        """Warp `sprite` by the full cumulative matrix (incl. shear) via a PIL
+        affine and blit it. Returns True on success, False to fall back to the
+        fast scale+rotate path (PIL missing or a degenerate/oversized result).
+
+        Geometry: texture pixel (px,py) maps to screen via the renderer's
+        local-cocos convention (offset_x+px, -offset_y-py) → matrix. The linear
+        part of that, pixel→screen, is A = [[na,-nc],[nb,-nd]] (the `-nc/-nd`
+        come from cocos Y-up vs texture Y-down). We warp about the sprite centre
+        and blit so that centre lands at (wcx,wcy) — identical placement to the
+        fast path, just with shear preserved.
+        """
+        try:
+            from PIL import Image
+        except Exception:
+            return False
+
+        na, nb, nc, nd, ntx, nty = matrix
+        w = sprite.get_width()
+        h = sprite.get_height()
+        if w <= 0 or h <= 0:
+            return False
+
+        A0, A1, A2, A3 = na, -nc, nb, -nd          # pixel→screen linear map
+        det = A0 * A3 - A1 * A2
+        if abs(det) < 1e-9:
+            return False
+
+        w_half = img_def['width'] * 0.5
+        h_half = img_def['height'] * 0.5
+        lcx =  img_def['offset_x'] + w_half
+        lcy = -img_def['offset_y'] - h_half
+        wcx = na * lcx + nc * lcy + ntx
+        wcy = nb * lcx + nd * lcy + nty
+        if not (math.isfinite(wcx) and math.isfinite(wcy)):
+            return False
+
+        # Transformed corner offsets (relative to centre) → output bbox.
+        xs, ys = [], []
+        for qx, qy in ((-w / 2, -h / 2), (w / 2, -h / 2),
+                       (w / 2, h / 2), (-w / 2, h / 2)):
+            xs.append(A0 * qx + A1 * qy)
+            ys.append(A2 * qx + A3 * qy)
+        minx, miny = min(xs), min(ys)
+        ow = int(math.ceil(max(xs) - minx))
+        oh = int(math.ceil(max(ys) - miny))
+        if ow <= 0 or oh <= 0 or ow > 4096 or oh > 4096:
+            return False
+
+        # Inverse map (output pixel → input texel) for PIL's AFFINE coeffs.
+        iA0, iA1 = A3 / det, -A1 / det
+        iA2, iA3 = -A2 / det, A0 / det
+        a = iA0; b = iA1; c = iA0 * minx + iA1 * miny + w / 2
+        d = iA2; e = iA3; f = iA2 * minx + iA3 * miny + h / 2
+
+        try:
+            pil = Image.frombytes('RGBA', (w, h),
+                                  pygame.image.tostring(sprite, 'RGBA'))
+            out = pil.transform((ow, oh), Image.AFFINE, (a, b, c, d, e, f),
+                                resample=Image.BILINEAR)
+            alpha_val = elem.get('alpha', 1.0)
+            if alpha_val is not None and alpha_val < 1.0:
+                bands = out.split()
+                scaled = bands[3].point(
+                    lambda v: int(v * max(0.0, min(1.0, alpha_val))))
+                out = Image.merge('RGBA', (bands[0], bands[1], bands[2], scaled))
+            warped = pygame.image.fromstring(out.tobytes(), (ow, oh), 'RGBA')
+        except Exception as exc:
+            log.debug("Affine warp failed for img %s: %s",
+                      img_def.get('name'), exc)
+            return False
+
+        bx = int(round(wcx + minx))
+        by = int(round(wcy + miny))
+        surface.blit(warped, (bx, by))
+        if bounds is not None:
+            bounds.expand(pygame.Rect(bx, by, ow, oh))
+        return True
 
     # ── Transform cache ───────────────────────────────────────────────────────
 

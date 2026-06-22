@@ -494,9 +494,19 @@ class _PlayerCore:
         raw_start = action.get('start', 0)
         raw_end   = action.get('end',   last_frame)
         duration  = raw_end - raw_start
-        is_global = (duration > last_frame) or (raw_start > 0 and duration >= last_frame)
+        # start/end are GLOBAL playlist indices (idle 0-62, walk 63-127, ...),
+        # not local MC frames. Any of these unambiguously means global → play
+        # the whole MC. `raw_end > last_frame` is the key one: it catches a
+        # walk whose duration is *shorter* than its MC (e.g. zombie_primitive
+        # walk: start=63 end=127 last_frame=69 → duration 64 < 69, so the older
+        # duration-only checks missed it and clamped the 70-frame walk to just
+        # frames 63-69).
+        is_global = (raw_start > last_frame
+                     or raw_end > last_frame
+                     or duration > last_frame
+                     or (raw_start > 0 and duration >= last_frame))
         if is_global:
-            return 0, min(duration, last_frame)
+            return 0, last_frame
         cs = max(0, min(raw_start, last_frame))
         ce = max(0, min(raw_end,   last_frame))
         if ce <= cs:
