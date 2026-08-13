@@ -229,6 +229,20 @@ def _emit_dom_frame(index: int, duration: int, elem,
         alpha = 1.0
     alpha = max(0.0, min(1.0, float(alpha)))
 
+    cm = elem.get('color_mult')
+    ca = elem.get('color_add')
+    rm = cm[0] / 255.0 if cm else 1.0
+    gm = cm[1] / 255.0 if cm else 1.0
+    bm = cm[2] / 255.0 if cm else 1.0
+    ro = int(ca[0]) if ca else 0
+    go = int(ca[1]) if ca else 0
+    bo = int(ca[2]) if ca else 0
+
+    color_attrs = (f'redMultiplier="{_fmt6(rm)}" greenMultiplier="{_fmt6(gm)}" '
+                   f'blueMultiplier="{_fmt6(bm)}" alphaMultiplier="{_fmt6(alpha)}"')
+    if ro or go or bo:
+        color_attrs += (f' redOffset="{ro}" greenOffset="{go}" blueOffset="{bo}"')
+
     # Sprite vs image: image XMLs use plain DOMSymbolInstance without
     # firstFrame attr in the example, but sprite-instances include firstFrame.
     extra = '' if is_image else ' firstFrame="0"'
@@ -242,8 +256,7 @@ def _emit_dom_frame(index: int, duration: int, elem,
         f'tx="{_fmt6(tx)}" ty="{_fmt6(ty)}"/>\n',
         '                                    </matrix>\n',
         '                                    <color>\n',
-        f'                                        <Color redMultiplier="1.000000" greenMultiplier="1.000000" '
-        f'blueMultiplier="1.000000" alphaMultiplier="{_fmt6(alpha)}"/>\n',
+        f'                                        <Color {color_attrs}/>\n',
         '                                    </color>\n',
         '                                </DOMSymbolInstance>\n',
         '                            </elements>\n',
@@ -311,11 +324,14 @@ def _build_layers_xml(frames_subset: list,
             return None
         libname = info[0]
         is_image = libname.startswith('image/')
-        # Key used to detect "identical frame" (same instance + matrix + alpha)
+        # Key used to detect "identical frame" (same instance + matrix + alpha + color)
         a, b, c, d, tx, ty = _flash_matrix(elem['matrix'])
         alpha = elem.get('alpha', 1.0)
+        cm = elem.get('color_mult')
+        ca = elem.get('color_add')
         key = (libname, round(a, 6), round(b, 6), round(c, 6), round(d, 6),
-               round(tx, 4), round(ty, 4), round(float(alpha or 1.0), 4))
+               round(tx, 4), round(ty, 4), round(float(alpha or 1.0), 4),
+               bytes(cm) if cm else None, bytes(ca) if ca else None)
         return (libname, is_image, elem, key)
 
     layer_blocks = []

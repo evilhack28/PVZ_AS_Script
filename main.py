@@ -154,7 +154,8 @@ def _load_atlas(atlas_path: str, pygame):
             return None
     # Anything else is treated as PVR (PVR2 'PVR!' at offset 44, PVR3 'PVR\x03'
     # at offset 0, Dreamcast 'GBIX'/'PVRT', etc. — load_pvr_texture sorts it out).
-    return load_pvr_texture(atlas_path)
+    surf = load_pvr_texture(atlas_path)
+    return surf.convert_alpha() if surf is not None else None
 
 
 # ─────────────────────────────────────────────────────────────────────────────

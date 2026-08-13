@@ -121,10 +121,17 @@ def _parse_impl(data: bytes):
         v1, v2, v3, v4 = struct.unpack_from('<4h', data, offset); offset += 8
         actions.append({'name': aname, 'start': v1, 'end': v2, 'mc_idx': v3, 'p4': v4})
 
+    # Files with a 12-byte non-standard header (e.g. community-exported Firmiana.bin)
+    # store element matrices in Flash Y-down convention rather than Cocos Y-up.
+    # Evidence: 90.8% of ty values are negative (vs. mixed distribution in standard
+    # game files).  Apply the Flash→Cocos inversion: (sx, -ky, -kx, sy, tx, -ty).
+    flash_y_down = (start_offset == 12)
+
     # Movie clips — probe 6-byte vs 4-byte clip header
     parsed = None
     for hdr_size in (6, 4):
-        result = _try_parse_clips(data, offset, num_mc_names, export_table, hdr_size)
+        result = _try_parse_clips(data, offset, num_mc_names, export_table, hdr_size,
+                                  flash_y_down)
         if result is not None:
             clips, end_offset = result
             if abs(end_offset - len(data)) < 16:
@@ -140,6 +147,7 @@ def _parse_impl(data: bytes):
         "format":            "RawBin",
         "clip_header_size":  hdr_size,
         "start_offset":      start_offset,
+        "flash_y_down":      flash_y_down,
         "consumed":          offset,
         "total":             len(data),
     })
@@ -148,7 +156,7 @@ def _parse_impl(data: bytes):
     return images, parsed, actions, True
 
 
-def _try_parse_clips(data, start, num_mc, export_table, hdr_size):
+def _try_parse_clips(data, start, num_mc, export_table, hdr_size, flash_y_down=False):
     off   = start
     clips = []
     for ci in range(num_mc):
@@ -168,12 +176,19 @@ def _try_parse_clips(data, start, num_mc, export_table, hdr_size):
                 if off + _ELEM_SIZE > len(data): return None
                 mc_id       = data[off]
                 frame_in_mc = data[off + 1]
+                # Upper 16 bits of the 4-byte "extra" field encode the explicit
+                # sub-frame index for eid=1 body-part-MC dispatch.  0 means
+                # "show frame 0"; N means "show frame N directly" (no modulo).
+                sub_frame   = struct.unpack_from('<I', data, off + 2)[0] >> 16
                 _extra, sx, ky, kx, sy, tx, ty = struct.unpack_from('<7f', data, off + 2)
+                if flash_y_down:
+                    ky, kx, ty = -ky, -kx, -ty
                 color_mult  = data[off + 30: off + 34]
                 color_add   = data[off + 34: off + 38]
                 off        += _ELEM_SIZE
                 elems.append({
                     'is_mc': True, 'id': mc_id, 'frame_index': frame_in_mc,
+                    'sub_frame': sub_frame,
                     'matrix': (sx, ky, kx, sy, tx, ty),
                     'alpha': color_mult[3] / 255.0,
                     'color_mult': bytes(color_mult), 'color_add': bytes(color_add),

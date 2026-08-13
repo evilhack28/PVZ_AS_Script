@@ -47,7 +47,8 @@ class ExportMixin:
         os.makedirs(out_dir, exist_ok=True)
         out_name = os.path.join(out_dir, f"{self.cfg.pvr_name}_{action['name']}.gif")
         try:
-            self._save_gif_fast(frames_to_save, out_name, dur_ms)
+            self._save_gif_fast(frames_to_save, out_name, dur_ms,
+                                self.cfg.background_rgb)
             msg = f"Saved {out_name}  ({len(frames_to_save)} frames)"
             print(msg); log.info(msg)
             self._gif_msg = f"Saved  {out_name}";  self._gif_msg_ttl = 180
@@ -100,7 +101,8 @@ class ExportMixin:
 
             out_name = os.path.join(out_dir, f"{self.cfg.pvr_name}_{act['name']}.gif")
             try:
-                self._save_gif_fast(frames_to_save, out_name, dur_ms)
+                self._save_gif_fast(frames_to_save, out_name, dur_ms,
+                                    self.cfg.background_rgb)
                 print(f"  [{idx + 1}/{total}] Saved {out_name}  ({len(frames_to_save)} frames)")
                 saved += 1
             except Exception as exc:
@@ -157,7 +159,8 @@ class ExportMixin:
 
             out_name = os.path.join(out_dir, f"{self.cfg.pvr_name}_{act['name']}_nobg.gif")
             try:
-                self._save_gif_fast(frames_to_save, out_name, dur_ms)
+                self._save_gif_fast(frames_to_save, out_name, dur_ms,
+                                    self.cfg.background_rgb)
                 print(f"  [{idx + 1}/{total}] Saved {out_name}  ({len(frames_to_save)} frames)")
                 saved += 1
             except Exception as exc:
@@ -292,27 +295,47 @@ class ExportMixin:
         # crop region before allocating the real canvas. 2048² (16 MB) is
         # plenty for the characters here and avoids the 67 MB / export cost
         # of a 4096² probe.
-        PROBE = 2048
+        PROBE  = 2048
+        TARGET = 1024         # target px for the longer axis of the output
         cx, cy = PROBE // 2, PROBE // 2
-        # Match the player's current zoom so the exported GIF looks the same
-        # as what the user sees on screen (zoom-wheel in, press G → GIF at
-        # that zoom). Clamped to the same [0.25, 8.0] range as the player.
-        z = max(0.25, min(8.0, getattr(self, 'zoom', 1.0)))
-        base = (z, 0.0, 0.0, -z, float(cx), float(cy))
 
+        # Pass 1: probe at z=1.0 to find the natural (unzoomed) bounding box.
+        base_z1    = (1.0, 0.0, 0.0, -1.0, float(cx), float(cy))
         probe_surf = pygame.Surface((PROBE, PROBE))
-        union_box  = BoundingBox()
+        union_z1   = BoundingBox()
 
         for f in range(a_start, a_end + 1):
             fb = BoundingBox()
-            self.renderer.draw(probe_surf, mc_idx, f, base, fb)
+            self.renderer.draw(probe_surf, mc_idx, f, base_z1, fb)
             if fb.valid:
-                union_box.minx = min(union_box.minx, fb.minx)
-                union_box.miny = min(union_box.miny, fb.miny)
-                union_box.maxx = max(union_box.maxx, fb.maxx)
-                union_box.maxy = max(union_box.maxy, fb.maxy)
+                union_z1.minx = min(union_z1.minx, fb.minx)
+                union_z1.miny = min(union_z1.miny, fb.miny)
+                union_z1.maxx = max(union_z1.maxx, fb.maxx)
+                union_z1.maxy = max(union_z1.maxy, fb.maxy)
 
         del probe_surf
+
+        # Auto-zoom: scale so the longest axis of the union bbox fits TARGET px.
+        # No minimum of 1.0 — large-effect animations (plantfood) are allowed to
+        # downscale below native so the canvas stays ≤ TARGET×TARGET and the
+        # export stays fast.  Small animations still get scaled up (up to 8×).
+        if union_z1.valid:
+            natural_w = max(1.0, union_z1.maxx - union_z1.minx)
+            natural_h = max(1.0, union_z1.maxy - union_z1.miny)
+            z = min(TARGET / max(natural_w, natural_h), 8.0)
+        else:
+            z = 1.0
+
+        # Scale bbox linearly to the computed z (bbox scales around cx,cy).
+        base = (z, 0.0, 0.0, -z, float(cx), float(cy))
+        if union_z1.valid:
+            union_box          = BoundingBox()
+            union_box.minx     = cx + z * (union_z1.minx - cx)
+            union_box.miny     = cy + z * (union_z1.miny - cy)
+            union_box.maxx     = cx + z * (union_z1.maxx - cx)
+            union_box.maxy     = cy + z * (union_z1.maxy - cy)
+        else:
+            union_box = union_z1
 
         # Compute tight crop rect
         pad = 4
@@ -605,12 +628,14 @@ class ExportMixin:
     # ── Fast GIF save ─────────────────────────────────────────────────────────
 
     @staticmethod
-    def _save_gif_fast(frames: list, path: str, duration_ms: int) -> None:
+    def _save_gif_fast(frames: list, path: str, duration_ms: int,
+                       background_rgb: tuple = (40, 40, 40)) -> None:
         """
         Save an animated GIF with a shared global palette (one quantise pass).
 
         RGBA frames produce a transparent GIF (index 255 = transparent).
-        RGB  frames produce an opaque GIF.
+        RGB  frames produce an opaque GIF with background_rgb pinned at index 0
+        so the background colour never drifts due to palette quantisation.
         """
         if not frames:
             return
@@ -620,6 +645,16 @@ class ExportMixin:
         step      = max(1, n // 16)
         samples   = frames[::step][:16]
         w, h      = frames[0].size
+
+        # MAXCOVERAGE spreads palette entries across the full colour space so
+        # rare-but-saturated colours (e.g. blue tears on a yellow character)
+        # always get palette slots. MEDIANCUT allocates proportionally to pixel
+        # frequency: a 1%-blue frame gets 0 blue entries and those pixels map
+        # to the nearest warm colour (appearing grey/brown in the GIF).
+        try:
+            _qmethod = PilImage.Quantize.MAXCOVERAGE
+        except AttributeError:
+            _qmethod = 1  # integer fallback for Pillow < 9.1
 
         if has_alpha:
             # Build palette from sample frames composited onto white,
@@ -631,7 +666,7 @@ class ExportMixin:
                 combined.paste(bg, (i * w, 0))
 
             # 255 colours - palette index 255 reserved for transparency.
-            quantised = combined.quantize(colors=255, dither=0)
+            quantised = combined.quantize(colors=255, dither=0, method=_qmethod)
             palette   = list(quantised.getpalette())
 
             pal_img = PilImage.new("P", (1, 1))
@@ -678,13 +713,18 @@ class ExportMixin:
             combined = PilImage.new("RGB", (w * len(samples), h))
             for i, s in enumerate(samples):
                 combined.paste(s, (i * w, 0))
-            quantised  = combined.quantize(colors=256, dither=0)
-            palette    = quantised.getpalette()
-            pal_img    = PilImage.new("P", (1, 1))
+            # 255 colours: palette index 0 is reserved for the exact background
+            # colour so it never drifts to a nearby green/brown shade.
+            quantised = combined.quantize(colors=255, dither=0, method=_qmethod)
+            raw_pal   = list(quantised.getpalette())[:255 * 3]
+            palette   = list(background_rgb) + raw_pal     # index 0 = background
+            palette  += [0] * max(0, 768 - len(palette))   # pad to 256 entries
+            pal_img   = PilImage.new("P", (1, 1))
             pal_img.putpalette(palette)
             pal_frames = [f.quantize(palette=pal_img, dither=0) for f in frames]
             pal_frames[0].save(
                 path, save_all=True,
                 append_images=pal_frames[1:],
                 duration=duration_ms, loop=0, optimize=False,
+                disposal=2, background=0,
             )

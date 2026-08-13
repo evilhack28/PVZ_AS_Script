@@ -491,6 +491,17 @@ class _PlayerCore:
 
     @staticmethod
     def _clamp_action_range(action: dict, last_frame: int):
+        # Shared-MC actions get pre-annotated local ranges (see
+        # _annotate_shared_mc_ranges).  Use them directly and skip the global-
+        # index heuristic, which would incorrectly collapse both actions to the
+        # full MC range (e.g. tree_105's plantfood / plantfood2 on the same MC).
+        if '_local_start' in action and '_local_end' in action:
+            ls = max(0, min(action['_local_start'], last_frame))
+            le = max(0, min(action['_local_end'],   last_frame))
+            if le > ls:
+                return ls, le
+            return 0, last_frame
+
         raw_start = action.get('start', 0)
         raw_end   = action.get('end',   last_frame)
         duration  = raw_end - raw_start
@@ -517,6 +528,7 @@ class _PlayerCore:
         if actions:
             valid = [a for a in actions if 0 <= a.get('mc_idx', -1) < len(self.movie_clips)]
             if valid:
+                self._annotate_shared_mc_ranges(valid)
                 return valid
         log.info("No valid actions - building one entry per movie-clip.")
         return [
@@ -524,3 +536,32 @@ class _PlayerCore:
              "start": 0, "end": max(0, len(mc['frames']) - 1), "p4": 0}
             for i, mc in enumerate(self.movie_clips) if mc['frames']
         ]
+
+    def _annotate_shared_mc_ranges(self, actions: list) -> None:
+        """When multiple actions share the same MC, their start/end are global
+        playlist offsets into that MC's frame sequence.  Precompute the local
+        frame range for each action (relative to the first action's start) so
+        _clamp_action_range can use the correct sub-range instead of always
+        collapsing to the full MC.
+
+        Example (tree_105.bin MC[42], last_frame=94):
+            plantfood:  global 79-104  → local  0-25
+            plantfood2: global 105-169 → local 26-90
+        Single-action MCs are untouched; they keep the existing heuristic.
+        """
+        from collections import defaultdict
+        mc_groups: dict = defaultdict(list)
+        for a in actions:
+            mc_groups[a['mc_idx']].append(a)
+
+        for mc_idx, group in mc_groups.items():
+            if len(group) < 2:
+                continue
+            group_sorted = sorted(group, key=lambda a: a.get('start', 0))
+            base         = group_sorted[0].get('start', 0)
+            mc           = self.movie_clips[mc_idx]
+            last_frame   = max(0, len(mc['frames']) - 1)
+            for a in group_sorted:
+                a['_local_start'] = max(0, a.get('start', 0) - base)
+                a['_local_end']   = min(last_frame,
+                                        max(0, a.get('end', last_frame) - base))

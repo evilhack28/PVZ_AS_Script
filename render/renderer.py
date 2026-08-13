@@ -145,7 +145,8 @@ class Renderer:
              transform_matrix: tuple,
              bounds: Optional[BoundingBox] = None,
              _depth: int = 0,
-             _visited: Optional[frozenset] = None) -> None:
+             _visited: Optional[frozenset] = None,
+             _alpha: float = 1.0) -> None:
         if _depth > 32:
             return
         if mc_idx < 0 or mc_idx >= len(self.movie_clips):
@@ -294,8 +295,15 @@ class Renderer:
                     if eid == 1 and child_frame >= 0:
                         # mc_id=1 is universally the body-part redirect MC.
                         # frame_index is the target MC index, not an image index.
+                        # sub_frame (upper 16 bits of the raw _extra field) is the
+                        # explicit frame of the target MC to show.  0 = frame 0
+                        # (normal/default pose); N = show frame N directly.
+                        # Using frame_num % mc_frames here is wrong — it cycles
+                        # all body parts in sync, causing the entire character to
+                        # snap between poses every few frames.
                         if child_frame < len(self.movie_clips):
-                            self.draw(surface, child_frame, frame_num,
+                            sub_fn = elem.get('sub_frame', 0)
+                            self.draw(surface, child_frame, sub_fn,
                                       (na, nb, nc, nd, ntx, nty),
                                       bounds, _depth + 1, _visited)
                         elif child_frame < len(self.images):
@@ -322,21 +330,23 @@ class Renderer:
                     # the tile, which the game never draws (FBIN path only).
                     if str(child_mc.get('name', '')).lower() in _GROUND_PLANE_NAMES:
                         continue
-                    next_frame = child_frame if child_frame >= 0 else frame_num
+                    next_frame   = child_frame if child_frame >= 0 else frame_num
+                    child_alpha  = elem.get('alpha', 1.0) * _alpha
                     self.draw(surface, eid, next_frame,
                               (na, nb, nc, nd, ntx, nty),
-                              bounds, _depth + 1, _visited)
+                              bounds, _depth + 1, _visited, child_alpha)
             else:
                 if eid < len(self.images):
                     self._draw_image(surface, eid, elem,
-                                     (na, nb, nc, nd, ntx, nty), bounds)
+                                     (na, nb, nc, nd, ntx, nty), bounds, _alpha)
 
     # ── Image drawing ─────────────────────────────────────────────────────────
 
     def _draw_image(self, surface: pygame.Surface,
                     img_idx: int, elem: dict,
                     matrix: tuple,
-                    bounds: Optional[BoundingBox]) -> None:
+                    bounds: Optional[BoundingBox],
+                    _parent_alpha: float = 1.0) -> None:
         img_def   = self.images[img_idx]
 
         # ── RawBin plane-image suppression ───────────────────────────────────
@@ -387,7 +397,7 @@ class Renderer:
         # warp can't run (PIL missing / degenerate matrix).
         if _affine_shear_deg(na, nb, nc, nd) > _SHEAR_AFFINE_DEG:
             if self._draw_image_affine(surface, sprite, img_def,
-                                       matrix, elem, bounds):
+                                       matrix, elem, bounds, _parent_alpha):
                 return
 
         # Intermediate MCs often carry the actual scale/rotation while the leaf
@@ -445,10 +455,24 @@ class Renderer:
         if not (math.isfinite(wcx) and math.isfinite(wcy)):
             return
 
-        alpha_val = elem.get('alpha', 1.0)
+        alpha_val = elem.get('alpha', 1.0) * _parent_alpha
+        if alpha_val <= 0.0:
+            return
         if alpha_val < 1.0:
             xformed = xformed.copy()
-            xformed.set_alpha(int(alpha_val * 255))
+            if xformed.get_flags() & pygame.SRCALPHA:
+                # set_alpha() is ignored on per-pixel alpha surfaces; scale alpha via multiply.
+                try:
+                    import numpy as _np
+                    _a = pygame.surfarray.pixels_alpha(xformed)
+                    _a[:] = (_a.astype(_np.uint16) * int(alpha_val * 255) // 255).astype(_np.uint8)
+                    del _a
+                except Exception:
+                    _mod = pygame.Surface(xformed.get_size(), pygame.SRCALPHA)
+                    _mod.fill((255, 255, 255, int(alpha_val * 255)))
+                    xformed.blit(_mod, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
+            else:
+                xformed.set_alpha(int(alpha_val * 255))
 
         r_rect        = xformed.get_rect()
         r_rect.center = (int(wcx), int(wcy))
@@ -462,7 +486,8 @@ class Renderer:
     def _draw_image_affine(self, surface: pygame.Surface,
                            sprite: pygame.Surface, img_def: dict,
                            matrix: tuple, elem: dict,
-                           bounds: Optional[BoundingBox]) -> bool:
+                           bounds: Optional[BoundingBox],
+                           _parent_alpha: float = 1.0) -> bool:
         """Warp `sprite` by the full cumulative matrix (incl. shear) via a PIL
         affine and blit it. Returns True on success, False to fall back to the
         fast scale+rotate path (PIL missing or a degenerate/oversized result).
@@ -540,8 +565,10 @@ class Renderer:
                     g = g.point(bytes(min(255, i + ca[1]) for i in range(256)))
                     b_ch = b_ch.point(bytes(min(255, i + ca[2]) for i in range(256)))
                 out = Image.merge('RGBA', (r, g, b_ch, a_ch))
-            alpha_val = elem.get('alpha', 1.0)
-            if alpha_val is not None and alpha_val < 1.0:
+            alpha_val = elem.get('alpha', 1.0) * _parent_alpha
+            if alpha_val <= 0.0:
+                return True
+            if alpha_val < 1.0:
                 bands = out.split()
                 scaled = bands[3].point(
                     lambda v: int(v * max(0.0, min(1.0, alpha_val))))
@@ -626,7 +653,8 @@ class Renderer:
                 arr[:, :, 1] = np.clip(arr[:, :, 1].astype(np.int16) + ag, 0, 255)
                 arr[:, :, 2] = np.clip(arr[:, :, 2].astype(np.int16) + ab, 0, 255)
 
-            return pygame.image.frombuffer(arr.tobytes(), (w, h), 'RGBA')
+            out = pygame.image.frombuffer(arr.tobytes(), (w, h), 'RGBA')
+            return out.convert_alpha()
 
         except Exception:
             pass
@@ -650,7 +678,8 @@ class Renderer:
                 b = b.point(bytes(min(255, i + ab) for i in range(256)))
 
             out = PILImage.merge('RGBA', (r, g, b, a))
-            return pygame.image.fromstring(out.tobytes(), (w, h), 'RGBA')
+            out = pygame.image.fromstring(out.tobytes(), (w, h), 'RGBA')
+            return out.convert_alpha()
 
         except Exception as exc:
             log.debug("Color transform failed: %s", exc)
