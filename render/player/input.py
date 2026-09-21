@@ -140,6 +140,10 @@ class InputMixin:
                 self.loop = not self.loop
             return quit_req, anim_active
 
+        if self.show_parts:
+            self._parts_handle_key(key)
+            return quit_req, anim_active
+
         if self.show_helmets:
             n = len(self.helmet_rows)
             if key in (pygame.K_ESCAPE, pygame.K_m):
@@ -171,6 +175,14 @@ class InputMixin:
         if key == pygame.K_i:
             self.show_list     = True
             self.list_selected = self.current_idx
+            return quit_req, anim_active
+
+        if key == pygame.K_p:
+            if not self.part_groups:
+                self._gif_msg     = "No parts to pick"
+                self._gif_msg_ttl = 120
+            else:
+                self.show_parts = True
             return quit_req, anim_active
 
         if key == pygame.K_m:

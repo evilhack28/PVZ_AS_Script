@@ -86,6 +86,10 @@ class Renderer:
         self._cache: OrderedDict = OrderedDict()
         # Lowercased substrings; any image whose name contains one of these is skipped during draw.
         self.hidden_parts: frozenset = frozenset()
+        # Image indices skipped during draw (parts picker)
+        self.hidden_images: frozenset = frozenset()
+        # Image indices outlined in red while drawn (parts picker selection)
+        self.highlight_images: frozenset = frozenset()
         # MC id remap applied at element walk: `{src_mc_id: dst_mc_id_or_None}`.
         self.mc_remap: dict = {}
 
@@ -198,6 +202,8 @@ class Renderer:
                     matrix: tuple, mult: tuple, add: tuple,
                     additive: bool,
                     bounds: Optional[BoundingBox]) -> None:
+        if img_idx in self.hidden_images:
+            return
         img_def = self.images[img_idx]
 
         # ── Hidden-parts filter (e.g. butter on the kungfu zombies' heads) ──
@@ -310,6 +316,8 @@ class Renderer:
         r_rect        = xformed.get_rect()
         r_rect.center = (int(wcx), int(wcy))
         self._blit(surface, xformed, r_rect, alpha_val, additive)
+        if img_idx in self.highlight_images:
+            pygame.draw.rect(surface, (255, 60, 60), r_rect.inflate(2, 2), 1)
 
         if bounds is not None:
             bounds.expand(r_rect)

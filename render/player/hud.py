@@ -62,6 +62,7 @@ _HELP_SECTIONS = [
         ("K",              "Toggle 'butter' (kungfu head sprite)"),
         ("C",              "Cycle costume (all / none / 1 / 2 …)"),
         ("M",              "Open helmet picker (cone / bucket states)"),
+        ("P",              "Parts picker: hide costume / layers by group"),
     ]),
     ("Export", [
         ("G / A / Z",      "GIF (current / all / all no-bg)"),
@@ -148,6 +149,8 @@ class HudMixin:
                 self._draw_action_list()
             if getattr(self, "show_helmets", False):
                 self._draw_helmet_picker()
+            if getattr(self, "show_parts", False):
+                self._draw_parts_picker()
             return
 
         # ── Status pill row (top-left) ────────────────────────────────────────
@@ -208,6 +211,12 @@ class HudMixin:
                 col   = _PAL["pill_dim"]
             r = _draw_icon_pill(self.screen, self.font, label,
                                 (pill_x, pill_y), col)
+            pill_x = r.right + gap
+
+        if getattr(self, "hidden_imgs", None):
+            r = _draw_icon_pill(self.screen, self.font,
+                                f"PARTS -{len(self.hidden_imgs)}",
+                                (pill_x, pill_y), _PAL["good"])
             pill_x = r.right + gap
 
         # Show a costume pill whenever the model HAS costume MCs, so the user sees the feature exists.
@@ -288,6 +297,8 @@ class HudMixin:
             self._draw_action_list()
         if getattr(self, "show_helmets", False):
             self._draw_helmet_picker()
+        if getattr(self, "show_parts", False):
+            self._draw_parts_picker()
 
     def _draw_help_overlay(self) -> None:
         """Full-screen darkened backdrop listing every key binding by section."""

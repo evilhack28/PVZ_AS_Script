@@ -104,6 +104,8 @@ class _PlayerCore:
         # Costume picker state.
         self._init_costumes()
 
+        self._init_parts()
+
         self._apply_filters()
 
         # Temporary status message shown after GIF export
@@ -178,6 +180,7 @@ class _PlayerCore:
             if not visible:
                 parts.add(name.lower())
         self.renderer.hidden_parts = frozenset(parts)
+        self.renderer.hidden_images = frozenset(getattr(self, 'hidden_imgs', ()))
 
     # ── Costume picker ────────────────────────────────────────────────────────
 
@@ -455,6 +458,7 @@ class _PlayerCore:
         sw, sh = self.screen.get_size()
         base   = self._base_transform(sw, sh)
         self.screen.fill(self.cfg.background_rgb)
+        self.renderer.highlight_images = self._parts_highlight()
         self.renderer.draw(self.screen, mc_idx, self._mc_frame(frame_idx),
                            base, frame_bounds)
         self._draw_hud(mc_idx, frame_idx, action_start, action_end)
@@ -503,6 +507,7 @@ class _PlayerCore:
         self.images, self.movie_clips = images, mcs
         self.renderer = Renderer(images, mcs, self.texture, rawbin=rawbin)
         self.renderer.hidden_parts = old.hidden_parts
+        self.renderer.hidden_images = old.hidden_images
         self.renderer.mc_remap     = old.mc_remap
         name = self.playlist[self.current_idx].get('name')
         self.playlist = self._build_playlist(actions)

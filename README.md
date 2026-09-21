@@ -9,6 +9,7 @@ Three entry points:
 | `main.py` | Pygame player. Opens a `.bin` + atlas in a window. |
 | `tools/convert_to_package.py` | `.bin + atlas` → Flash CS5 `.package` (XFL project). |
 | `tools/convert_from_package.py` | `.package` → `.bin + .pvr`. Round-trip back into a playable / game-loadable pair. |
+| `tools/pvr_to_png.py` | Convert every `.pvr` in a folder to `.png`. |
 
 ---
 
@@ -53,6 +54,7 @@ Add `--game-quirks` to decode FBIN numbers exactly like the game does (including
 | `K` | Hide `butter` accessory (kungfu zombies) |
 | `D` | Toggle game data (decode like the game's bug) and show how much differs |
 | `C` | Cycle costumes (plants with `custom_NN_*` variants) |
+| `P` | Parts picker: hide a baked-in costume or any layer, by group of images or one by one (`E` expands a group) |
 | `G` / `A` / `Z` | Export current / all / all-no-bg as GIF |
 | `S` / `T` / `J` | Export sprites / atlas / frame JSON |
 | `H` / `?` | HUD / full help |
@@ -108,6 +110,19 @@ Play it back in `main.py` to verify.
 
 ---
 
+## Convert `.pvr` -> `.png` (whole folder)
+
+```bash
+python tools/pvr_to_png.py "C:/path/to/folder"          # convert, then delete each .pvr
+python tools/pvr_to_png.py "C:/path/to/folder" --keep   # keep the .pvr files
+python tools/pvr_to_png.py "C:/path/to/folder" --dry-run
+python tools/pvr_to_png.py                              # no argument: asks for the folder
+```
+
+Uses the project's own PVR decoder (PVRTexTool decodes these legacy files with wrong colours). A `.pvr` is only deleted after its PNG is re-read and matches the decode exactly; failures are listed and left untouched. Other flags: `-r` (subfolders), `--overwrite` (replace an existing `.png`).
+
+---
+
 ## Importable API
 
 ```python
@@ -128,6 +143,7 @@ PVZ_AS_Script/
 │   ├── convert_to_package.py     .bin -> .package
 │   ├── convert_from_package.py   .package -> .bin + .pvr
 │   ├── bin_diff.py               compare two .bin files structurally
+│   ├── pvr_to_png.py             folder of .pvr -> .png
 │   └── ghidra/                   headless Ghidra scripts used to recover the format
 ├── parsers/                game_bin.py (the game's loader, ported) + input_buffer, fbin_parser
 ├── render/                 renderer + player subpackage
