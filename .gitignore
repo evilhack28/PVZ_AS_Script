@@ -1,6 +1,9 @@
-*.pyc
 /samples
 /.claude
+/tests
+/tools/ghidra
+/docs
+*.pyc
 *.xml
 *.png
 *.xfl

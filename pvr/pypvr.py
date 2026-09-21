@@ -1,13 +1,9 @@
 import numpy as np
 import os
 import re
-import sys
 import math
-import time
 import io
-import struct
 import zlib
-import fnmatch
 from PIL import Image
 
 '''
@@ -373,7 +369,7 @@ class Pypvr:
 
                                 # process PVPL matches
                                 for offset in pvpl_matches:
-                                    self.debug: print(f"PVPL found at offset: {hex(offset)}")
+                                    if self.debug: print(f"PVPL found at offset: {hex(offset)}")
 
                                     if offset + 0xE + 2 <= len(buffer):
                                         value = int.from_bytes(buffer[offset + 0xE:offset + 0xE + 2],
@@ -548,7 +544,7 @@ class Pypvr:
                 blue = (color >> 0) & 0xFF
                 green = (color >> 8) & 0xFF
                 red = (color >> 16) & 0xFF
-                alpha = (color >> 24) & 0xFF
+                # (alpha channel is dropped: output buffer is RGB)
 
             act_buffer += bytes([red, green, blue])
             return act_buffer

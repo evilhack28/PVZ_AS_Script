@@ -1,17 +1,4 @@
-"""
-bin_diff.py
------------
-Structural diff between two FBIN / RawBin animation files.
-
-Compares header (format, version, ext_float), image list, movie-clip list,
-actions, and (optionally) the per-MC element references. Output focuses on
-content changes - new sprites, renamed body parts, longer/shorter animations,
-added/removed actions - not visual/atlas differences.
-
-    python bin_diff.py a.bin b.bin
-    python bin_diff.py a.bin b.bin --verbose          # per-MC element refs
-    python bin_diff.py a.bin b.bin --by-index         # match MCs by index instead of name
-"""
+"""Structural diff between two FBIN / RawBin animation files."""
 from __future__ import annotations
 
 import argparse
@@ -27,8 +14,7 @@ from fbin_parser import parse_binary
 
 
 def _img_sig(im: dict) -> tuple:
-    """Identity for an image: name + dimensions. Atlas coords ignored (atlas
-    repack between versions is not a content change)."""
+    """Identity for an image: name + dimensions."""
     return (im['name'], round(im['width'], 1), round(im['height'], 1))
 
 

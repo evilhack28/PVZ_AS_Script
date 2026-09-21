@@ -1,30 +1,23 @@
-"""
-Player core: PlayerConfig, _PlayerCore (run loop, base transform, meta resolution).
-"""
+"""Player core: PlayerConfig, _PlayerCore (run loop, base transform, meta resolution)."""
 
 import logging
 import math
 import os
 import re
 from dataclasses import dataclass
-from typing import Optional, List
+from typing import Optional
 
 import pygame
 
+import input_buffer
 from renderer import Renderer, BoundingBox
 from fbin_parser import DEFAULT_FRAME_RATE
 
 # Plant/zombie costume MCs follow a `_custom*` / `custom_NN*` naming convention
-# (e.g. `_custom_left`, `custom_01_left`, `wuxh_wdss_custom_03`). `_CUSTOM_PAT`
-# detects any costume MC; `_VARIANT_PAT` pulls out the trailing variant number
-# from numbered ones — when the number is absent the MC is the "base" slot.
 _CUSTOM_PAT  = re.compile(r'custom', re.IGNORECASE)
 _VARIANT_PAT = re.compile(r'custom[_\W]?(\d+)', re.IGNORECASE)
 
-# Helmet/armor MCs ship as `<family>_<state>` where state ∈
-# {norm, norm_wu, damage_NN, plantfood}. The picker (M key) lists every
-# matching MC as its own checkbox so the user can hide individual
-# helmet states (e.g. show only damage_02 of the cone).
+# Helmet/armor MCs ship as `<family>_<state>` where state ∈ {norm, norm_wu, damage_NN, plantfood}.
 _HELMET_STATE_PAT = re.compile(
     r'^(.+?)_(norm_wu|norm|damage_\d+|plantfood)$', re.IGNORECASE)
 _HELMET_STATE_ORDER = {
@@ -41,9 +34,7 @@ log = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-# Valid fps_mode values:
-#   'source'  - use the raw frame_rate stored in the MC
-#   'custom'  - use fps_custom value regardless of source
+# fps_mode: 'source' (MC frame rate) or 'custom' (fps_custom).
 
 @dataclass
 class PlayerConfig:
@@ -72,7 +63,11 @@ class _PlayerCore:
                  texture_surf: pygame.Surface,
                  config: Optional[PlayerConfig] = None,
                  rawbin: bool = False,
-                 define_key: str = "") -> None:
+                 define_key: str = "",
+                 loader=None) -> None:
+        # `loader()` re-parses the open bin -> (images, movie_clips, actions, is_rawbin)
+        self.loader        = loader
+        self._resume_frame = None
 
         self.images      = images
         self.movie_clips = movie_clips
@@ -81,6 +76,8 @@ class _PlayerCore:
         self.define_key  = define_key
         self.renderer    = Renderer(images, movie_clips, texture_surf, rawbin=rawbin)
 
+        # MC-frame sequence of the action being played (see _play_action)
+        self._cur_frames = None
         self.playlist = self._build_playlist(actions)
         if not self.playlist:
             raise RuntimeError("No animations to play.")
@@ -98,20 +95,13 @@ class _PlayerCore:
         self.list_selected = self.current_idx
         self.show_hud      = True
 
-        # K key toggles this. When True, any sprite whose name contains
-        # 'butter' is suppressed during draw — useful on the kungfu zombies
-        # whose butter sprite covers the head.
+        # K key toggles this.
         self.hide_butter = False
 
-        # Helmet picker (M key). Built from MC names matching
-        # `<family>_<state>` where state is norm/damage_NN/plantfood/etc.
-        # User checks/unchecks rows; unchecked names go into
-        # renderer.hidden_parts via _apply_filters().
+        # Helmet picker (M key).
         self._init_helmets()
 
-        # Costume picker state. C key cycles through self.costume_cycle which
-        # is built from MC names containing 'custom' at startup. _apply_costume()
-        # pushes the resulting hidden-MC set to the renderer.
+        # Costume picker state.
         self._init_costumes()
 
         self._apply_filters()
@@ -148,10 +138,7 @@ class _PlayerCore:
     # ── Helmet picker ─────────────────────────────────────────────────────────
 
     def _init_helmets(self) -> None:
-        """Scan MC names for `<family>_<state>` patterns and build a flat
-        ordered list of helmet variants. Each row is a checkbox in the M
-        picker. By default every variant is visible — the user unchecks the
-        states they want hidden (e.g. keep only damage_02 of the cone)."""
+        """Scan MC names for `<family>_<state>` patterns and build a flat ordered list of helmet variants."""
         # family -> list of {mc_idx, mc_name, state}
         groups: dict = {}
         for i, mc in enumerate(self.movie_clips):
@@ -183,9 +170,7 @@ class _PlayerCore:
         self.helmet_sel:     int  = 0
 
     def _apply_filters(self) -> None:
-        """Push the union of all hidden-name sources to the renderer.
-        Sources: K-key butter toggle + helmet picker unchecks. Substring
-        matching in the renderer means each MC name acts as its own filter."""
+        """Push the union of all hidden-name sources to the renderer."""
         parts: set = set()
         if getattr(self, 'hide_butter', False):
             parts.add('butter')
@@ -197,22 +182,7 @@ class _PlayerCore:
     # ── Costume picker ────────────────────────────────────────────────────────
 
     def _init_costumes(self) -> None:
-        """Build costume swap slots from MC names + action-tree references.
-
-        A "slot" is a group of MCs sharing the same name stem around `custom`
-        (e.g. `_custom_left` and `custom_01_left` both share stem `left`).
-        A numbered MC (`custom_NN_*`) only counts as a real costume variant
-        when it's never referenced from any action MC's frames — those are
-        the alternates the game swaps in at runtime. MCs whose names happen
-        to contain "custom" but are actively drawn (chizhenhua's `custom_01`
-        and `custom_02`, which dispatch the entire body) are ignored.
-
-        The slot's base — the MC variant N replaces — is the referenced
-        unnumbered sibling if one exists (CherryBomb `_custom_left` →
-        `custom_01_left`); otherwise the unnumbered slot member (peashooter
-        `wuxh_wdss__custom`) which may itself be unreferenced (the picker
-        becomes a no-op in that case but the cycle still surfaces).
-        """
+        """Build costume swap slots from MC names + action-tree references."""
         ref_counts = self._action_mc_ref_counts()
 
         # bucket by stem -> list of (variant_key, mc_idx)
@@ -230,15 +200,12 @@ class _PlayerCore:
         for stem, members in by_stem.items():
             numbered  = [(v, idx) for v, idx in members if isinstance(v, int)]
             base_mem  = [idx for v, idx in members if v == 'base']
-            # Filter out numbered variants that are actively drawn — they're
-            # body parts misnamed as "custom", not swap targets.
+            # Filter out numbered variants that are actively drawn
             numbered  = [(v, idx) for v, idx in numbered
                          if ref_counts.get(idx, 0) == 0]
             if not numbered:
                 continue
-            # Prefer a referenced unnumbered MC as the base (the active body
-            # part the variant replaces). Fall back to any unnumbered, else
-            # the lowest-numbered variant.
+            # Prefer a referenced unnumbered MC as the base (the active body part the variant replaces).
             base_mc = next((idx for idx in base_mem if ref_counts.get(idx, 0) > 0), None)
             if base_mc is None and base_mem:
                 base_mc = base_mem[0]
@@ -265,24 +232,31 @@ class _PlayerCore:
         self._apply_costume()
 
     def _action_mc_ref_counts(self) -> dict:
-        """Count direct MC-element references inside each action MC's frame
-        tree. Used to tell active body parts from inert swap targets."""
+        """Count direct MC-element references inside each action MC's frame tree."""
         roots = {a['mc_idx'] for a in self.playlist
                  if 0 <= a.get('mc_idx', -1) < len(self.movie_clips)}
         counts: dict = {}
+        rawbin = self.renderer.rawbin
+        n_mc   = len(self.movie_clips)
         for ai in roots:
             for frame in self.movie_clips[ai]['frames']:
                 for e in frame:
-                    if e['is_mc']:
-                        counts[e['id']] = counts.get(e['id'], 0) + 1
+                    if not e['is_mc']:
+                        continue
+                    if rawbin:
+                        # RawBin `id` is a dispatch route; the real target MC of an eid=1 redirect lives in `frame_index`.
+                        fi = e.get('frame_index', -1)
+                        if e['id'] != 1 or not (0 <= fi < n_mc):
+                            continue
+                        tgt = fi
+                    else:
+                        tgt = e['id']
+                    counts[tgt] = counts.get(tgt, 0) + 1
         return counts
 
     @staticmethod
     def _costume_stem(name: str) -> str:
-        """Strip the `custom` marker (and its variant number) from a costume
-        MC name to derive the shared slot key. `_custom_left` and
-        `custom_01_left` both reduce to `left`; `wuxh_wdss__custom` and
-        `wuxh_wdss_custom_03` both reduce to `wuxh_wdss`."""
+        """Strip the `custom` marker (and its variant number) from a costume MC name to derive the shared slot key."""
         n   = name.lower()
         idx = n.find('custom')
         if idx < 0:
@@ -307,16 +281,13 @@ class _PlayerCore:
         else:
             for s in self.costume_slots:
                 tgt = s['variants'].get(mode)
-                # Slot has this variant → swap base for it. Slot lacks the
-                # variant → drop the base so mixing characters with different
-                # variant numbers (CherryBomb#1 + chizhenhua-style) stays sane.
+                # Slot has this variant → swap base for it.
                 remap[s['base_mc']] = tgt if tgt is not None else None
         self.renderer.mc_remap = dict(remap)
 
     @property
     def costume_all_mcs(self) -> set:
-        """Set of every MC index touched by the costume picker (HUD uses this
-        to know whether to show the pill)."""
+        """Set of every MC index touched by the costume picker (HUD uses this to know whether to show the pill)."""
         out: set = set()
         for s in getattr(self, 'costume_slots', []):
             out.add(s['base_mc'])
@@ -331,28 +302,17 @@ class _PlayerCore:
         return f"#{m}"
 
     def _base_transform(self, screen_w: int, screen_h: int) -> tuple:
-        """
-        Build the root affine transform (a, b, c, d, tx, ty) that maps from
-        Cocos Y-up space to pygame screen space. Identity + Y-flip centred on
-        the screen, with zoom/pan/RawBin-recentre applied.
-        """
+        """Build the root affine transform (a, b, c, d, tx, ty) that maps from Cocos Y-up space to pygame screen space."""
         cx = screen_w * 0.5
         cy = screen_h * 0.5
         z  = self.zoom
-        # Content is pre-centred on the world origin at conversion time (see
-        # convert_from_package._center_actions), so the origin maps straight to
-        # the screen centre and zoom stays anchored on the character.
+        # Content is pre-centred on the world origin at conversion time
         return (z, 0.0, 0.0, -z,
                 cx + self.pan_x,
                 cy + self.pan_y)
 
     def _resolve_fps(self, action: dict, mc=None) -> int:
-        """
-        Return the playback fps for *action*.
-
-        'custom' → self.fps_custom
-        otherwise → MC `frame_rate` if > 0, else DEFAULT_FRAME_RATE
-        """
+        """Return the playback fps for *action*."""
         if self.fps_mode == 'custom':
             return max(1, self.fps_custom)
 
@@ -426,25 +386,34 @@ class _PlayerCore:
             self.current_idx = (self.current_idx + 1) % len(self.playlist)
             return True
 
-        mc         = self.movie_clips[mc_idx]
-        last_frame = max(0, len(mc['frames']) - 1)
-        action_start, action_end = self._clamp_action_range(action, last_frame)
+        mc     = self.movie_clips[mc_idx]
+        frames = self._action_frames(action)
+        if not frames:
+            log.warning("Action '%s' has no playable frames - skipping.", action['name'])
+            self.current_idx = (self.current_idx + 1) % len(self.playlist)
+            return True
+        # The local frame index runs 0..len-1; `frames` maps it to the MC frame the game shows
+        action_start, action_end = 0, len(frames) - 1
+        self._cur_frames = frames
 
-        frame_rate = self._resolve_fps(action, mc)
         play_loop  = self.loop
 
-        frame_dur   = 1000.0 / frame_rate
         frame_idx   = action_start
+        if self._resume_frame is not None:            # kept across a data reload
+            frame_idx = max(action_start, min(action_end, self._resume_frame))
+            self._resume_frame = None
         timer       = 0.0
         anim_active = True
         self._step_frame_idx = None
 
-        render_cap = max(self.cfg.fps_cap, frame_rate)
-
-        log.info("Playing '%s'  [MC: %s]  frames %d-%d  @%dfps",
-                 action['name'], mc['name'], action_start, action_end, frame_rate)
+        log.info("Playing '%s'  [MC: %s]  %d frames (mc frames %d..%d)  @%dfps",
+                 action['name'], mc['name'], len(frames), frames[0], frames[-1],
+                 self._resolve_fps(action, mc))
 
         while anim_active:
+            # Re-resolved every tick so the 1/2/4 fps keys take effect at once.
+            frame_rate = self._resolve_fps(action, mc)
+            render_cap = max(self.cfg.fps_cap, frame_rate)
             dt = self.clock.tick(render_cap)
             if not self.paused:
                 timer += dt
@@ -460,9 +429,12 @@ class _PlayerCore:
                 self._step_frame_idx = None
 
             # Advance frame
-            effective_dur = frame_dur / max(0.01, self.speed)
+            effective_dur = (1000.0 / frame_rate) / max(0.01, self.speed)
             if not self.paused and timer >= effective_dur:
-                timer = 0.0
+                # Keep the remainder so 30 fps stays 30 fps on a 60 Hz loop
+                timer -= effective_dur
+                if timer >= effective_dur:
+                    timer = 0.0
                 frame_idx += 1
                 if frame_idx > action_end:
                     if play_loop:
@@ -483,85 +455,99 @@ class _PlayerCore:
         sw, sh = self.screen.get_size()
         base   = self._base_transform(sw, sh)
         self.screen.fill(self.cfg.background_rgb)
-        self.renderer.draw(self.screen, mc_idx, frame_idx, base, frame_bounds)
+        self.renderer.draw(self.screen, mc_idx, self._mc_frame(frame_idx),
+                           base, frame_bounds)
         self._draw_hud(mc_idx, frame_idx, action_start, action_end)
         pygame.display.flip()
 
     # ── Playlist + frame range helpers ────────────────────────────────────────
 
-    @staticmethod
-    def _clamp_action_range(action: dict, last_frame: int):
-        # Shared-MC actions get pre-annotated local ranges (see
-        # _annotate_shared_mc_ranges).  Use them directly and skip the global-
-        # index heuristic, which would incorrectly collapse both actions to the
-        # full MC range (e.g. tree_105's plantfood / plantfood2 on the same MC).
-        if '_local_start' in action and '_local_end' in action:
-            ls = max(0, min(action['_local_start'], last_frame))
-            le = max(0, min(action['_local_end'],   last_frame))
-            if le > ls:
-                return ls, le
-            return 0, last_frame
+    # ── Game-data comparison (D key) ──────────────────────────────────────────
 
-        raw_start = action.get('start', 0)
-        raw_end   = action.get('end',   last_frame)
-        duration  = raw_end - raw_start
-        # start/end are GLOBAL playlist indices (idle 0-62, walk 63-127, ...),
-        # not local MC frames. Any of these unambiguously means global → play
-        # the whole MC. `raw_end > last_frame` is the key one: it catches a
-        # walk whose duration is *shorter* than its MC (e.g. zombie_primitive
-        # walk: start=63 end=127 last_frame=69 → duration 64 < 69, so the older
-        # duration-only checks missed it and clamped the 70-frame walk to just
-        # frames 63-69).
-        is_global = (raw_start > last_frame
-                     or raw_end > last_frame
-                     or duration > last_frame
-                     or (raw_start > 0 and duration >= last_frame))
-        if is_global:
-            return 0, last_frame
-        cs = max(0, min(raw_start, last_frame))
-        ce = max(0, min(raw_end,   last_frame))
-        if ce <= cs:
-            return 0, last_frame
-        return cs, ce
+    @staticmethod
+    def _matrix_diff_stats(old_mcs: list, new_mcs: list):
+        """(differing, total, worst_position_px, worst_skew_deg) between two parses of the same bin."""
+        total = diff = 0
+        wpos = wskew = 0.0
+        for a_mc, b_mc in zip(old_mcs, new_mcs):
+            for fa, fb in zip(a_mc['frames'], b_mc['frames']):
+                for ea, eb in zip(fa, fb):
+                    total += 1
+                    ma, mb = ea['matrix'], eb['matrix']
+                    if ma == mb:
+                        continue
+                    diff += 1
+                    wpos = max(wpos, abs(ma[4] - mb[4]), abs(ma[5] - mb[5]))
+                    wskew = max(wskew, abs(ma[1] - mb[1]), abs(ma[2] - mb[2]))
+        return diff, total, wpos, math.degrees(math.atan(wskew))
+
+    def _toggle_game_data(self, frame_idx: int) -> bool:
+        """Re-parse the bin with the other tag-1 decoding and swap it in."""
+        if self.loader is None:
+            self._gif_msg, self._gif_msg_ttl = "Data reload unavailable", 120
+            return False
+        quirks_now = not input_buffer.TAG1_SIGNED
+        input_buffer.set_game_quirks(not quirks_now)
+        try:
+            images, mcs, actions, rawbin = self.loader()
+        except Exception as exc:                       # noqa: BLE001
+            images = None
+            log.error("Reload failed: %s", exc)
+        if images is None:
+            input_buffer.set_game_quirks(quirks_now)   # keep the working mode
+            self._gif_msg, self._gif_msg_ttl = "Reload failed - unchanged", 180
+            return False
+
+        diff, total, wpos, wskew = self._matrix_diff_stats(self.movie_clips, mcs)
+        old = self.renderer
+        self.images, self.movie_clips = images, mcs
+        self.renderer = Renderer(images, mcs, self.texture, rawbin=rawbin)
+        self.renderer.hidden_parts = old.hidden_parts
+        self.renderer.mc_remap     = old.mc_remap
+        name = self.playlist[self.current_idx].get('name')
+        self.playlist = self._build_playlist(actions)
+        self.current_idx = next((i for i, a in enumerate(self.playlist)
+                                 if a.get('name') == name),
+                                min(self.current_idx, len(self.playlist) - 1))
+        self._resume_frame = frame_idx
+
+        mode = "GAME DATA (buggy)" if not quirks_now else "FIXED data"
+        if rawbin or diff == 0:
+            note = "no difference (RawBin / no negative tag-1 values)"
+        else:
+            note = (f"{diff}/{total} matrices differ ({100.0 * diff / total:.1f}%), "
+                    f"worst {wpos:.2f}px / {wskew:.2f}deg")
+        msg = f"{mode}: {note}"
+        print(msg)
+        self._gif_msg, self._gif_msg_ttl = msg, 400
+        return True
+
+    def _mc_frame(self, local_idx: int) -> int:
+        """MC frame shown at local action index `local_idx`."""
+        f = self._cur_frames
+        if f and 0 <= local_idx < len(f):
+            return f[local_idx]
+        return local_idx
+
+    def _action_frames(self, action: dict) -> list:
+        """The exact MC-frame sequence the game plays for `action` ((p4 + i) % mc_frames, i = 0..end-start)."""
+        frames = action.get('frames')
+        if frames:
+            return frames
+        mc_idx = action.get('mc_idx', -1)
+        if 0 <= mc_idx < len(self.movie_clips):
+            return list(range(len(self.movie_clips[mc_idx]['frames'])))
+        return []
 
     def _build_playlist(self, actions: list) -> list:
         if actions:
-            valid = [a for a in actions if 0 <= a.get('mc_idx', -1) < len(self.movie_clips)]
+            valid = [a for a in actions if self._action_frames(a)]
             if valid:
-                self._annotate_shared_mc_ranges(valid)
                 return valid
         log.info("No valid actions - building one entry per movie-clip.")
         return [
-            {"name": mc['name'], "mc_idx": i,
-             "start": 0, "end": max(0, len(mc['frames']) - 1), "p4": 0}
+            {"name": mc['name'], "mc_idx": i, "start": 0,
+             "end": len(mc['frames']) - 1, "p4": 0,
+             "frames": list(range(len(mc['frames']))), "valid": True}
             for i, mc in enumerate(self.movie_clips) if mc['frames']
         ]
-
-    def _annotate_shared_mc_ranges(self, actions: list) -> None:
-        """When multiple actions share the same MC, their start/end are global
-        playlist offsets into that MC's frame sequence.  Precompute the local
-        frame range for each action (relative to the first action's start) so
-        _clamp_action_range can use the correct sub-range instead of always
-        collapsing to the full MC.
-
-        Example (tree_105.bin MC[42], last_frame=94):
-            plantfood:  global 79-104  → local  0-25
-            plantfood2: global 105-169 → local 26-90
-        Single-action MCs are untouched; they keep the existing heuristic.
-        """
-        from collections import defaultdict
-        mc_groups: dict = defaultdict(list)
-        for a in actions:
-            mc_groups[a['mc_idx']].append(a)
-
-        for mc_idx, group in mc_groups.items():
-            if len(group) < 2:
-                continue
-            group_sorted = sorted(group, key=lambda a: a.get('start', 0))
-            base         = group_sorted[0].get('start', 0)
-            mc           = self.movie_clips[mc_idx]
-            last_frame   = max(0, len(mc['frames']) - 1)
-            for a in group_sorted:
-                a['_local_start'] = max(0, a.get('start', 0) - base)
-                a['_local_end']   = min(last_frame,
-                                        max(0, a.get('end', last_frame) - base))

@@ -1,12 +1,9 @@
-"""
-renderer.py
------------
-Stateful renderer for Cocos2d-x FBIN / RawBin animations.
-"""
+"""Stateful renderer for the game's animation bins (FBIN and RawBin)."""
 
 import math
 import logging
 from collections import OrderedDict
+from functools import lru_cache
 from dataclasses import dataclass
 from typing import Optional
 
@@ -17,29 +14,37 @@ log = logging.getLogger(__name__)
 # ── Constants ────────────────────────────────────────────────────────────────
 MAX_CACHE_SIZE = 4096
 
-# Lawn-alignment placeholder MCs. In FBIN these draw a thin ground-swatch strip
-# (e.g. `001_105x3`, a band of atlas/padding garbage) scaled tens of times to
-# cover a tile — the game never renders them (the lawn is drawn separately), so
-# neither should we. Skipped only in the FBIN draw path: in RawBin `ground_swatch`
-# is MC[1], used as a dispatch-route redirect (never recursed into by name), so
-# this never interferes there.
+# Lawn-alignment placeholder MCs.
 _GROUND_PLANE_NAMES = frozenset({'ground_swatch', 'ground_swatch_plane', '_ground'})
 
-# Sprites whose cumulative matrix shears the axes by more than this many degrees
-# take the slower PIL affine path (true parallelogram warp) instead of the fast
-# scale+rotate path, which can only produce rigid rotated rectangles. Below the
-# threshold the fast path is visually identical and stays in use, so the common
-# no-shear case is untouched (this guard is why the affine path doesn't regress
-# normal content the way an unconditional one did). Catches Flash walk-cycle
-# limb bends and attack motion-smear trails (e.g. zombie_snai attack3, whose
-# faint sheared jaw-bitmap smears render as rigid floating jaws without it).
+# Sprites sheared beyond this many degrees use the slower PIL affine path.
 _SHEAR_AFFINE_DEG = 5.0
+
+# pygame 2 honours set_alpha() on per-pixel-alpha surfaces, so no copy is needed.
+_PYGAME2 = pygame.version.vernum[0] >= 2
+
+# Game draw paths: batch ignores the blend flag; non-batch honours it (and squares leaf colour).
+HONOUR_ADDITIVE_BLEND   = True
+GAME_LEAF_COLOR_SQUARED = False
+
+_ONE4  = (1.0, 1.0, 1.0, 1.0)
+_ZERO4 = (0.0, 0.0, 0.0, 0.0)
+_WHITE_B = (255, 255, 255, 255)
+_ZERO_B  = (0, 0, 0, 0)
+
+
+@lru_cache(maxsize=512)
+def _lut_mult(m: int) -> bytes:
+    return bytes(int(i * m / 255) for i in range(256))
+
+
+@lru_cache(maxsize=512)
+def _lut_add(a: int) -> bytes:
+    return bytes(min(255, i + a) for i in range(256))
 
 
 def _affine_shear_deg(na: float, nb: float, nc: float, nd: float) -> float:
-    """Degrees the matrix's two axes deviate from orthogonal (0 = no shear).
-    Computed on the cumulative matrix — uniform zoom and the screen Y-flip both
-    preserve the inter-axis angle, so no base-stripping is needed."""
+    """Degrees the matrix's two axes deviate from orthogonal (0 = no shear)."""
     m0 = math.hypot(na, nb)
     m1 = math.hypot(nc, nd)
     if m0 < 1e-9 or m1 < 1e-9:
@@ -67,13 +72,6 @@ class BoundingBox:
         self.maxx = max(self.maxx, rect.right)
         self.maxy = max(self.maxy, rect.bottom)
 
-    def to_pygame_rect(self, screen_w: int, screen_h: int) -> pygame.Rect:
-        x0 = max(0, int(self.minx))
-        y0 = max(0, int(self.miny))
-        x1 = min(screen_w, int(self.maxx))
-        y1 = min(screen_h, int(self.maxy))
-        return pygame.Rect(x0, y0, x1 - x0, y1 - y0)
-
 
 # ── Renderer ─────────────────────────────────────────────────────────────────
 
@@ -86,282 +84,125 @@ class Renderer:
         self.texture     = texture_surf
         self.rawbin      = rawbin
         self._cache: OrderedDict = OrderedDict()
-        # Populated at the start of each draw() call (top-level only).
-        # Used by the RawBin plane-image suppression check.
-        self._plane_imgs: set = set()
-        # Lowercased substrings; any image whose name contains one of these
-        # is skipped during draw. Set by Player (e.g. K-key toggles {'butter'}).
+        # Lowercased substrings; any image whose name contains one of these is skipped during draw.
         self.hidden_parts: frozenset = frozenset()
         # MC id remap applied at element walk: `{src_mc_id: dst_mc_id_or_None}`.
-        # `dst=None` skips the subtree (e.g. costume NONE); `dst=other_idx`
-        # renders that MC in place of the source — used by the C-key costume
-        # picker to swap a base body part for a numbered `custom_NN_*` variant
-        # while preserving the original placement transform from the parent.
         self.mc_remap: dict = {}
+
+        # Base-transform state, refreshed by every top-level draw().
+        self._base_inv_lin = (1.0, 0.0, 0.0, 1.0)
+        self._base_scale   = (1.0, 1.0)
+        # When a list, _draw_image appends draw records instead of blitting
+        self._collector: Optional[list] = None
+        # Skip lawn-alignment placeholder MCs (see _GROUND_PLANE_NAMES).
+        self.skip_ground_swatch: bool = True
+        # Lower-cased names / ground-plane flags, precomputed for the hot loop.
+        self._mc_lname  = [str(m.get('name', '')).lower() for m in movie_clips]
+        self._img_lname = [str(i.get('name', '')).lower() for i in images]
+        self._ground_mcs = frozenset(i for i, n in enumerate(self._mc_lname)
+                                     if n in _GROUND_PLANE_NAMES)
 
     # ── Public draw call ──────────────────────────────────────────────────────
 
-    def _scan_plane_images(self, mc_idx: int, frame_num: int,
-                           visited: frozenset = None) -> set:
-        """
-        Recursively find all image indices that will be drawn via mc_id=0
-        (ground_swatch_plane) elements in this MC tree frame.
-        Used to suppress redundant mc_id=1 draws of the same image.
-        """
-        if visited is None: visited = frozenset()
-        if mc_idx in visited: return set()
-        visited = visited | {mc_idx}
-
-        mc = self.movie_clips[mc_idx]
-        if not mc['frames']: return set()
-        idx      = frame_num % len(mc['frames'])
-        elements = mc['frames'][idx]
-
-        result = set()
-        for elem in elements:
-            eid = elem['id']
-            cf  = elem.get('frame_index', -1)
-            if eid < 0: continue
-            if eid >= len(self.movie_clips): continue
-            child_mc = self.movie_clips[eid]
-
-            if eid == 0:  # ground_swatch_plane
-                # Direct leaf draw via plane
-                if len(child_mc['frames']) == 1 and 0 <= cf < len(self.images):
-                    result.add(cf)
-                elif len(child_mc['frames']) == 1 and len(self.images) <= cf < len(self.movie_clips):
-                    result |= self._scan_plane_images(cf, frame_num, visited)
-            else:
-                # Recurse into composite MCs to find nested plane draws
-                if len(child_mc['frames']) > 1 or cf < 0:
-                    nf = cf if cf >= 0 else frame_num
-                    result |= self._scan_plane_images(eid, nf, visited)
-                elif len(child_mc['frames']) == 1 and len(self.images) <= cf < len(self.movie_clips):
-                    result |= self._scan_plane_images(cf, frame_num, visited)
-        return result
+    def collect_draws(self, mc_idx: int, frame_num: int,
+                      transform_matrix: tuple) -> list:
+        """Walk the tree exactly like draw() but return the image draws as records {img_idx, img_name, world_matrix"""
+        self._collector = []
+        try:
+            self.draw(None, mc_idx, frame_num, transform_matrix)
+            return self._collector
+        finally:
+            self._collector = None
 
     def draw(self, surface: pygame.Surface,
              mc_idx: int, frame_num: int,
              transform_matrix: tuple,
-             bounds: Optional[BoundingBox] = None,
-             _depth: int = 0,
-             _visited: Optional[frozenset] = None,
-             _alpha: float = 1.0) -> None:
-        if _depth > 32:
-            return
-        if mc_idx < 0 or mc_idx >= len(self.movie_clips):
+             bounds: Optional[BoundingBox] = None) -> None:
+        """Draw MC `mc_idx` at MC frame `frame_num` under `transform_matrix` (a, b, c, d, tx, ty)."""
+        if not (0 <= mc_idx < len(self.movie_clips)):
             return
 
-        if _visited is None:
-            _visited = frozenset()
-        if mc_idx in _visited:
-            return
-        _visited = _visited | {mc_idx}
-
-        # At top level: find all img_idxs drawn via ground_swatch_plane (mc_id=0).
-        # We suppress mc_id=1 draws for those same images to avoid duplicates
-        # (e.g. zombie_skull draws the head via mc_id=0 AND the idle frame
-        # has a stale direct mc_id=1 reference to the same head image).
-        if _depth == 0 and self.rawbin:
-            self._plane_imgs: set = self._scan_plane_images(mc_idx, frame_num)
-        elif _depth == 0:
-            self._plane_imgs = set()
-
-        # At top level: cache the inverse of the base transform's linear part.
-        # Both formats share the same problem: intermediate MCs can carry the
-        # actual scale/rotation while the leaf image element's matrix is identity
-        # (e.g. RawBin starburst → MC[21]; FBIN action MC → 1-frame body-part MC
-        # → leaf IMG). `_draw_image` factors this base out of the cumulative
-        # matrix so it recovers the full tree's scale/rotation, not just the leaf's.
-        if _depth == 0:
-            ba, bb, bc, bd, _, _ = transform_matrix
-            bdet = ba * bd - bc * bb
-            if abs(bdet) > 1e-12:
-                self._base_inv_lin = (bd / bdet, -bb / bdet,
-                                      -bc / bdet,  ba / bdet)
-            else:
-                self._base_inv_lin = (1.0, 0.0, 0.0, 1.0)
-            # Stash the base scale magnitudes (zoom × meta scale) so
-            # `_draw_image` can multiply them back onto the per-sprite scale.
-            # The factor-out above strips them along with the Y-flip, which is
-            # why the old code zoomed positions but not sprites.
-            self._base_scale = (
-                math.sqrt(ba * ba + bb * bb),
-                math.sqrt(bc * bc + bd * bd),
-            )
-
-        mc = self.movie_clips[mc_idx]
-        if not mc['frames']:
-            return
-
-        idx      = frame_num % len(mc['frames'])
-        elements = mc['frames'][idx]
-        pa, pb, pc, pd, ptx, pty = transform_matrix
-
-        # ── RawBin display-list deduplication ────────────────────────────────
-        # In RawBin, frame_index is the actual sprite/pose selector.
-        # The same frame_index CAN appear multiple times legitimately when
-        # the same sprite is placed at DIFFERENT positions (e.g. left and
-        # right pupils both reference the same MC at different coordinates).
-        # We only suppress a placement when (frame_index, tx, ty) is truly
-        # identical — a genuine duplicate at the exact same spot.
-        if self.rawbin:
-            last_idx: dict = {}
-            for i, elem in enumerate(elements):
-                m   = elem['matrix']
-                key = (elem.get('frame_index', -1),
-                       round(m[4], 1), round(m[5], 1))
-                last_idx[key] = i          # last wins per (fi, tx, ty)
-            keep     = set(last_idx.values())
-            elements = [e for i, e in enumerate(elements) if i in keep]
-
-        # ── FBIN image display-list deduplication ─────────────────────────────
-        # Flash sometimes exports stale keyframe placements: the same image
-        # appears twice at the *same* spot — older keyframe + new one. Drop
-        # those (last wins). But the same image at *different* positions is
-        # a legitimate symmetrical placement (left/right pupils, paired dots,
-        # eyebrows) and MUST be kept — a previous count-based rule killed
-        # one eye on bellis/Breeder_zombie/bush. Same position-aware key as
-        # the RawBin branch above.
+        # Cache the inverse of the base transform's linear part
+        ba, bb, bc, bd, _, _ = transform_matrix
+        bdet = ba * bd - bc * bb
+        if abs(bdet) > 1e-12:
+            self._base_inv_lin = (bd / bdet, -bb / bdet,
+                                  -bc / bdet,  ba / bdet)
         else:
-            last_idx: dict = {}
-            for i, elem in enumerate(elements):
-                if elem['is_mc']:
-                    continue
-                m   = elem['matrix']
-                key = (elem['id'], round(m[4], 1), round(m[5], 1))
-                last_idx[key] = i
-            keep     = set(last_idx.values())
-            elements = [e for i, e in enumerate(elements)
-                        if e['is_mc'] or i in keep]
+            self._base_inv_lin = (1.0, 0.0, 0.0, 1.0)
+        self._base_scale = (math.sqrt(ba * ba + bb * bb),
+                            math.sqrt(bc * bc + bd * bd))
 
-        for elem in elements:
-            eid = elem['id']
+        self._visit(surface, mc_idx, frame_num, transform_matrix,
+                    _ONE4, _ZERO4, False, 0, frozenset(), bounds)
+
+    def _visit(self, surface, mc_idx: int, frame_num: int, matrix: tuple,
+               mult: tuple, add: tuple, blend: bool, depth: int,
+               visited: frozenset, bounds: Optional[BoundingBox]) -> None:
+        """One MC frame."""
+        if depth > 32 or mc_idx in visited:
+            return
+        frames = self.movie_clips[mc_idx]['frames']
+        if not frames:
+            return
+        visited = visited | {mc_idx}
+        elements = frames[frame_num % len(frames)]
+        pa, pb, pc, pd, ptx, pty = matrix
+        n_mc = len(self.movie_clips)
+        n_img = len(self.images)
+
+        for el in elements:
+            eid = el['id']
             if eid < 0:
                 continue
 
-            la, lb, lc, ld, ltx, lty = elem['matrix']
-            na  = pa * la + pc * lb
-            nb  = pb * la + pd * lb
-            nc  = pa * lc + pc * ld
-            nd  = pb * lc + pd * ld
-            ntx = pa * ltx + pc * lty + ptx
-            nty = pb * ltx + pd * lty + pty
+            la, lb, lc, ld, ltx, lty = el['matrix']
+            m = (pa * la + pc * lb,
+                 pb * la + pd * lb,
+                 pa * lc + pc * ld,
+                 pb * lc + pd * ld,
+                 pa * ltx + pc * lty + ptx,
+                 pb * ltx + pd * lty + pty)
 
-            if elem['is_mc']:
-                child_frame = elem.get('frame_index', -1)
-                if eid >= len(self.movie_clips):
+            if el['is_mc']:
+                # Costume remap: swap a base body-part MC for its variant (or hide it when mapped to None)
+                if self.mc_remap and eid in self.mc_remap:
+                    eid = self.mc_remap[eid]
+                    if eid is None:
+                        continue
+                if eid >= n_mc:
                     continue
-
-                # Costume remap: swap a base body-part MC for its variant
-                # (or skip entirely when mapped to None). Applied BEFORE the
-                # subtree is fetched so we honour both swap and hide modes
-                # without changing the parent's transform.
-                if eid in self.mc_remap:
-                    new_eid = self.mc_remap[eid]
-                    if new_eid is None:
-                        continue
-                    eid = new_eid
-                    if eid >= len(self.movie_clips):
-                        continue
-                child_mc = self.movie_clips[eid]
-
-                # Hidden-parts filter — match against the name of whatever the
-                # element actually renders, NOT blindly MC[eid].name. RawBin
-                # reuses `eid` as a dispatch code (eid=0 → ground/image-direct,
-                # eid=1 → redirect to MC[child_frame], eid≠1 with child_frame
-                # in image range → image-direct), so MC[eid] is often unrelated
-                # to what's drawn. Example: zombie_greatwall_gun.bin has MC[0]
-                # named 'butter' — the old check hid every eid=0 body part.
                 if self.hidden_parts:
-                    tgt_name = None
-                    if self.rawbin:
-                        if eid == 1 and 0 <= child_frame < len(self.movie_clips):
-                            tgt_name = self.movie_clips[child_frame].get('name', '')
-                        elif 0 <= child_frame < len(self.images):
-                            tgt_name = self.images[child_frame].get('name', '')
-                        elif (len(child_mc['frames']) == 1
-                                and 0 <= child_frame < len(self.movie_clips)):
-                            tgt_name = self.movie_clips[child_frame].get('name', '')
-                        else:
-                            tgt_name = child_mc.get('name', '')
-                    else:
-                        tgt_name = child_mc.get('name', '')
-                    tgt_lower = str(tgt_name).lower()
-                    if any(p in tgt_lower for p in self.hidden_parts):
+                    name = self._mc_lname[eid]
+                    if any(part in name for part in self.hidden_parts):
                         continue
-
-                if self.rawbin:
-                    if eid == 1 and child_frame >= 0:
-                        # mc_id=1 is universally the body-part redirect MC.
-                        # frame_index is the target MC index, not an image index.
-                        # sub_frame (upper 16 bits of the raw _extra field) is the
-                        # explicit frame of the target MC to show.  0 = frame 0
-                        # (normal/default pose); N = show frame N directly.
-                        # Using frame_num % mc_frames here is wrong — it cycles
-                        # all body parts in sync, causing the entire character to
-                        # snap between poses every few frames.
-                        if child_frame < len(self.movie_clips):
-                            sub_fn = elem.get('sub_frame', 0)
-                            self.draw(surface, child_frame, sub_fn,
-                                      (na, nb, nc, nd, ntx, nty),
-                                      bounds, _depth + 1, _visited)
-                        elif child_frame < len(self.images):
-                            self._draw_image(surface, child_frame, elem,
-                                             (na, nb, nc, nd, ntx, nty), bounds)
-                    elif child_frame >= 0 and child_frame < len(self.images):
-                        # mc_id≠1 (eid=0 ground, eid=2 image-pointer, etc.):
-                        # frame_index is a direct image index.
-                        self._draw_image(surface, child_frame, elem,
-                                         (na, nb, nc, nd, ntx, nty), bounds)
-                    elif len(child_mc['frames']) == 1 and child_frame >= 0:
-                        if child_frame < len(self.movie_clips):
-                            self.draw(surface, child_frame, frame_num,
-                                      (na, nb, nc, nd, ntx, nty),
-                                      bounds, _depth + 1, _visited)
-                    else:
-                        next_frame = child_frame if child_frame >= 0 else frame_num
-                        self.draw(surface, eid, next_frame,
-                                  (na, nb, nc, nd, ntx, nty),
-                                  bounds, _depth + 1, _visited)
-                else:
-                    # Skip lawn-alignment placeholder MCs (ground_swatch): a
-                    # garbage strip the source stretches tens of times to mark
-                    # the tile, which the game never draws (FBIN path only).
-                    if str(child_mc.get('name', '')).lower() in _GROUND_PLANE_NAMES:
-                        continue
-                    next_frame   = child_frame if child_frame >= 0 else frame_num
-                    child_alpha  = elem.get('alpha', 1.0) * _alpha
-                    self.draw(surface, eid, next_frame,
-                              (na, nb, nc, nd, ntx, nty),
-                              bounds, _depth + 1, _visited, child_alpha)
-            else:
-                if eid < len(self.images):
-                    self._draw_image(surface, eid, elem,
-                                     (na, nb, nc, nd, ntx, nty), bounds, _alpha)
+                if self.skip_ground_swatch and eid in self._ground_mcs:
+                    continue
+                cm = el.get('color_mult') or _WHITE_B
+                ca = el.get('color_add') or _ZERO_B
+                nmult = (mult[0] * cm[0] / 255.0, mult[1] * cm[1] / 255.0,
+                         mult[2] * cm[2] / 255.0, mult[3] * cm[3] / 255.0)
+                nadd  = (add[0] + ca[0] / 255.0, add[1] + ca[1] / 255.0,
+                         add[2] + ca[2] / 255.0, add[3] + ca[3] / 255.0)
+                self._visit(surface, eid, el.get('frame_index', 0), m, nmult, nadd,
+                            el.get('blend', False), depth + 1, visited, bounds)
+            elif eid < n_img:
+                additive = (el.get('blend', False) if depth == 0 else blend)
+                self._draw_image(surface, eid, el, m, mult, add,
+                                 additive and HONOUR_ADDITIVE_BLEND, bounds)
 
     # ── Image drawing ─────────────────────────────────────────────────────────
 
     def _draw_image(self, surface: pygame.Surface,
                     img_idx: int, elem: dict,
-                    matrix: tuple,
-                    bounds: Optional[BoundingBox],
-                    _parent_alpha: float = 1.0) -> None:
-        img_def   = self.images[img_idx]
-
-        # ── RawBin plane-image suppression ───────────────────────────────────
-        # If this image is drawn via ground_swatch_plane (mc_id=0) elsewhere
-        # in the same frame, skip this mc_id=1 instance — it's a stale direct
-        # reference that would produce a duplicate (e.g. two heads).
-        if (self.rawbin
-                and elem.get('id') == 1
-                and hasattr(self, '_plane_imgs')
-                and img_idx in self._plane_imgs):
-            return
+                    matrix: tuple, mult: tuple, add: tuple,
+                    additive: bool,
+                    bounds: Optional[BoundingBox]) -> None:
+        img_def = self.images[img_idx]
 
         # ── Hidden-parts filter (e.g. butter on the kungfu zombies' heads) ──
         if self.hidden_parts:
-            img_name_lower = str(img_def.get('name', '')).lower()
+            img_name_lower = self._img_lname[img_idx]
             if any(p in img_name_lower for p in self.hidden_parts):
                 return
 
@@ -371,10 +212,37 @@ class Renderer:
         h_i  = int(img_def['height'])
         if w_i <= 0 or h_i <= 0:
             return
-        # Skip Flash pivot/registration markers: tiny images at tex origin (0,0)
-        # contain PVRTC block-corner garbage and are never meant to be visible.
+        # Skip Flash pivot/registration markers: tiny images at tex origin
         if tx_i == 0 and ty_i == 0 and w_i <= 4 and h_i <= 4:
             return
+
+        # ── Colour: accumulated multiply/add (see GAME_LEAF_COLOR_SQUARED)
+        cm = elem.get('color_mult') or _WHITE_B
+        ca = elem.get('color_add') or _ZERO_B
+        if GAME_LEAF_COLOR_SQUARED:
+            mr, mg, mb, ma = (min(255, int(cm[i] * (mult[i] * cm[i] / 255.0)))
+                              for i in range(4))
+        else:
+            mr, mg, mb, ma = (min(255, int(cm[i] * mult[i])) for i in range(4))
+        add_rgb = tuple(min(255, int((add[i] + ca[i] / 255.0) * 255.0))
+                        for i in range(3))
+        alpha_val = ma / 255.0
+        if self._collector is not None:
+            self._collector.append({
+                "img_idx":      img_idx,
+                "img_name":     img_def.get("name", ""),
+                "world_matrix": list(matrix),
+                "local_matrix": list(elem['matrix']),
+                "alpha":        alpha_val,
+                "color_mult":   [mr, mg, mb],
+                "color_add":    list(add_rgb),
+                "additive":     bool(additive),
+            })
+            return
+        if ma <= 0:
+            return
+        mult_rgb = (mr, mg, mb)
+
         src_rect = pygame.Rect(tx_i, ty_i, w_i, h_i)
         tw = self.texture.get_width()
         th = self.texture.get_height()
@@ -391,28 +259,18 @@ class Renderer:
         na, nb, nc, nd, ntx, nty = matrix
 
         # ── Guarded affine path for sheared sprites ──────────────────────────
-        # The fast path below drops 2D shear (renders limbs/smears as rigid
-        # rotated rectangles). For significantly sheared sprites, warp the real
-        # parallelogram via PIL instead. Falls through to the fast path if the
-        # warp can't run (PIL missing / degenerate matrix).
         if _affine_shear_deg(na, nb, nc, nd) > _SHEAR_AFFINE_DEG:
-            if self._draw_image_affine(surface, sprite, img_def,
-                                       matrix, elem, bounds, _parent_alpha):
+            if self._draw_image_affine(surface, sprite, img_def, matrix,
+                                       mult_rgb, add_rgb, alpha_val,
+                                       additive, bounds):
                 return
 
-        # Intermediate MCs often carry the actual scale/rotation while the leaf
-        # element matrix is identity (RawBin: eid=1 → MC[fi] redirect; FBIN:
-        # action MC → 1-frame body-part MC → leaf IMG). Use the cumulative
-        # matrix with the base transform factored out so the sprite reflects the
-        # full tree's transform, not just the leaf's.
-        if hasattr(self, '_base_inv_lin'):
-            iba, ibb, ibc, ibd = self._base_inv_lin
-            la = iba * na + ibc * nb
-            lb = ibb * na + ibd * nb
-            lc = iba * nc + ibc * nd
-            ld = ibb * nc + ibd * nd
-        else:
-            la, lb, lc, ld, _ltx, _lty = elem['matrix']
+        # Use the cumulative matrix minus the base transform to get the tree's scale/rotation.
+        iba, ibb, ibc, ibd = self._base_inv_lin
+        la = iba * na + ibc * nb
+        lb = ibb * na + ibd * nb
+        lc = iba * nc + ibc * nd
+        ld = ibb * nc + ibd * nd
 
         scale_x_l = math.sqrt(la * la + lb * lb)
         if scale_x_l == 0.0:
@@ -427,21 +285,15 @@ class Renderer:
         if flip_y:
             scale_y_l = -scale_y_l
 
-        # Re-apply the base scale (zoom × meta scale) that was stripped along
-        # with the Y-flip by `_base_inv_lin`. Without this, positions zoom
-        # but sprites stay native-size — that's the "zoom moves the parts"
-        # behaviour that masked the real geometry. At zoom=1 with no meta
-        # scale this is a no-op so existing layouts are unchanged.
-        bsx, bsy = getattr(self, '_base_scale', (1.0, 1.0))
+        # Re-apply the base scale (zoom x meta scale) stripped with the Y-flip.
+        bsx, bsy = self._base_scale
         scale_x = scale_x_l * bsx
         scale_y = scale_y_l * bsy
 
-        cm = elem.get('color_mult')
-        ca = elem.get('color_add')
         cache_key = (img_idx, round(scale_x, 4), round(scale_y, 4),
-                     round(rotation_deg, 2), flip_y, cm, ca)
+                     round(rotation_deg, 2), flip_y, mult_rgb, add_rgb)
         xformed   = self._get_cached(sprite, cache_key, scale_x, scale_y,
-                                     rotation_deg, flip_y, cm, ca)
+                                     rotation_deg, flip_y, mult_rgb, add_rgb)
         if xformed is None:
             return
 
@@ -455,50 +307,59 @@ class Renderer:
         if not (math.isfinite(wcx) and math.isfinite(wcy)):
             return
 
-        alpha_val = elem.get('alpha', 1.0) * _parent_alpha
-        if alpha_val <= 0.0:
-            return
-        if alpha_val < 1.0:
-            xformed = xformed.copy()
-            if xformed.get_flags() & pygame.SRCALPHA:
-                # set_alpha() is ignored on per-pixel alpha surfaces; scale alpha via multiply.
-                try:
-                    import numpy as _np
-                    _a = pygame.surfarray.pixels_alpha(xformed)
-                    _a[:] = (_a.astype(_np.uint16) * int(alpha_val * 255) // 255).astype(_np.uint8)
-                    del _a
-                except Exception:
-                    _mod = pygame.Surface(xformed.get_size(), pygame.SRCALPHA)
-                    _mod.fill((255, 255, 255, int(alpha_val * 255)))
-                    xformed.blit(_mod, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
-            else:
-                xformed.set_alpha(int(alpha_val * 255))
-
         r_rect        = xformed.get_rect()
         r_rect.center = (int(wcx), int(wcy))
-        surface.blit(xformed, r_rect)
+        self._blit(surface, xformed, r_rect, alpha_val, additive)
 
         if bounds is not None:
             bounds.expand(r_rect)
+
+    def _blit(self, surface: pygame.Surface, surf: pygame.Surface, dest,
+              alpha: float, additive: bool) -> None:
+        """Blit `surf` with surface alpha `alpha` (0..1)."""
+        if additive:
+            # Alpha-weighted colour = the sprite composited over black.
+            tmp = pygame.Surface(surf.get_size())
+            tmp.fill((0, 0, 0))
+            if alpha >= 1.0:
+                tmp.blit(surf, (0, 0))
+            elif _PYGAME2:
+                surf.set_alpha(int(alpha * 255))
+                tmp.blit(surf, (0, 0))
+                surf.set_alpha(255)
+            else:
+                tmp.blit(self._faded_copy(surf, alpha), (0, 0))
+            surface.blit(tmp, dest, special_flags=pygame.BLEND_RGB_ADD)
+        elif alpha >= 1.0:
+            surface.blit(surf, dest)
+        elif _PYGAME2:
+            # Blit the cached surface with a temporary surface alpha (no copy).
+            surf.set_alpha(int(alpha * 255))
+            surface.blit(surf, dest)
+            surf.set_alpha(255)
+        else:
+            surface.blit(self._faded_copy(surf, alpha), dest)
+
+    @staticmethod
+    def _faded_copy(surf: pygame.Surface, alpha_val: float) -> pygame.Surface:
+        """pygame 1.x fallback: per-pixel-alpha surfaces ignore set_alpha()."""
+        out = surf.copy()
+        if out.get_flags() & pygame.SRCALPHA:
+            mod = pygame.Surface(out.get_size(), pygame.SRCALPHA)
+            mod.fill((255, 255, 255, int(alpha_val * 255)))
+            out.blit(mod, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
+        else:
+            out.set_alpha(int(alpha_val * 255))
+        return out
 
     # ── Affine (shear) path ───────────────────────────────────────────────────
 
     def _draw_image_affine(self, surface: pygame.Surface,
                            sprite: pygame.Surface, img_def: dict,
-                           matrix: tuple, elem: dict,
-                           bounds: Optional[BoundingBox],
-                           _parent_alpha: float = 1.0) -> bool:
-        """Warp `sprite` by the full cumulative matrix (incl. shear) via a PIL
-        affine and blit it. Returns True on success, False to fall back to the
-        fast scale+rotate path (PIL missing or a degenerate/oversized result).
-
-        Geometry: texture pixel (px,py) maps to screen via the renderer's
-        local-cocos convention (offset_x+px, -offset_y-py) → matrix. The linear
-        part of that, pixel→screen, is A = [[na,-nc],[nb,-nd]] (the `-nc/-nd`
-        come from cocos Y-up vs texture Y-down). We warp about the sprite centre
-        and blit so that centre lands at (wcx,wcy) — identical placement to the
-        fast path, just with shear preserved.
-        """
+                           matrix: tuple, mult_rgb: tuple, add_rgb: tuple,
+                           alpha_val: float, additive: bool,
+                           bounds: Optional[BoundingBox]) -> bool:
+        """Warp `sprite` by the full cumulative matrix (incl."""
         try:
             from PIL import Image
         except Exception:
@@ -548,24 +409,20 @@ class Renderer:
             out = pil.transform((ow, oh), Image.AFFINE, (a, b, c, d, e, f),
                                 resample=Image.BILINEAR)
             # Apply color transform on the warped result
-            cm = elem.get('color_mult')
-            ca = elem.get('color_add')
-            has_mult = (cm is not None and
-                        (cm[0] != 255 or cm[1] != 255 or cm[2] != 255))
-            has_add  = (ca is not None and
-                        (ca[0] != 0 or ca[1] != 0 or ca[2] != 0))
+            cm, ca = mult_rgb, add_rgb
+            has_mult = (cm[0] != 255 or cm[1] != 255 or cm[2] != 255)
+            has_add  = (ca[0] != 0 or ca[1] != 0 or ca[2] != 0)
             if has_mult or has_add:
                 r, g, b_ch, a_ch = out.split()
                 if has_mult:
-                    r = r.point(bytes(int(i * cm[0] / 255) for i in range(256)))
-                    g = g.point(bytes(int(i * cm[1] / 255) for i in range(256)))
-                    b_ch = b_ch.point(bytes(int(i * cm[2] / 255) for i in range(256)))
+                    r = r.point(_lut_mult(cm[0]))
+                    g = g.point(_lut_mult(cm[1]))
+                    b_ch = b_ch.point(_lut_mult(cm[2]))
                 if has_add:
-                    r = r.point(bytes(min(255, i + ca[0]) for i in range(256)))
-                    g = g.point(bytes(min(255, i + ca[1]) for i in range(256)))
-                    b_ch = b_ch.point(bytes(min(255, i + ca[2]) for i in range(256)))
+                    r = r.point(_lut_add(ca[0]))
+                    g = g.point(_lut_add(ca[1]))
+                    b_ch = b_ch.point(_lut_add(ca[2]))
                 out = Image.merge('RGBA', (r, g, b_ch, a_ch))
-            alpha_val = elem.get('alpha', 1.0) * _parent_alpha
             if alpha_val <= 0.0:
                 return True
             if alpha_val < 1.0:
@@ -581,7 +438,7 @@ class Renderer:
 
         bx = int(round(wcx + minx))
         by = int(round(wcy + miny))
-        surface.blit(warped, (bx, by))
+        self._blit(surface, warped, (bx, by), 1.0, additive)
         if bounds is not None:
             bounds.expand(pygame.Rect(bx, by, ow, oh))
         return True
@@ -625,11 +482,7 @@ class Renderer:
     def _apply_color_transform(self, surf: pygame.Surface,
                                color_mult, color_add,
                                has_mult: bool, has_add: bool) -> pygame.Surface:
-        """Apply Flash ColorTransform RGB channels.
-        color_mult bytes: (R,G,B,A) unsigned 0-255, 255=identity.
-        color_add  bytes: (R,G,B,A) unsigned 0-255, 0=identity.
-        Returns a new surface with the transform applied.
-        """
+        """Apply Flash ColorTransform RGB channels."""
         w, h = surf.get_size()
         raw = pygame.image.tostring(surf, 'RGBA')  # platform-independent RGBA
 
@@ -653,8 +506,11 @@ class Renderer:
                 arr[:, :, 1] = np.clip(arr[:, :, 1].astype(np.int16) + ag, 0, 255)
                 arr[:, :, 2] = np.clip(arr[:, :, 2].astype(np.int16) + ab, 0, 255)
 
-            out = pygame.image.frombuffer(arr.tobytes(), (w, h), 'RGBA')
-            return out.convert_alpha()
+            out = pygame.image.frombuffer(arr, (w, h), 'RGBA')
+            try:
+                return out.convert_alpha()
+            except pygame.error:          # no display (headless export)
+                return out.copy()         # detach from arr's buffer
 
         except Exception:
             pass
@@ -666,16 +522,14 @@ class Renderer:
             r, g, b, a = pil.split()
 
             if has_mult:
-                mr = color_mult[0]; mg = color_mult[1]; mb = color_mult[2]
-                r = r.point(bytes(int(i * mr / 255) for i in range(256)))
-                g = g.point(bytes(int(i * mg / 255) for i in range(256)))
-                b = b.point(bytes(int(i * mb / 255) for i in range(256)))
+                r = r.point(_lut_mult(color_mult[0]))
+                g = g.point(_lut_mult(color_mult[1]))
+                b = b.point(_lut_mult(color_mult[2]))
 
             if has_add:
-                ar = color_add[0]; ag = color_add[1]; ab = color_add[2]
-                r = r.point(bytes(min(255, i + ar) for i in range(256)))
-                g = g.point(bytes(min(255, i + ag) for i in range(256)))
-                b = b.point(bytes(min(255, i + ab) for i in range(256)))
+                r = r.point(_lut_add(color_add[0]))
+                g = g.point(_lut_add(color_add[1]))
+                b = b.point(_lut_add(color_add[2]))
 
             out = PILImage.merge('RGBA', (r, g, b, a))
             out = pygame.image.fromstring(out.tobytes(), (w, h), 'RGBA')
@@ -684,6 +538,3 @@ class Renderer:
         except Exception as exc:
             log.debug("Color transform failed: %s", exc)
             return surf
-
-    def clear_cache(self) -> None:
-        self._cache.clear()

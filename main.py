@@ -1,26 +1,4 @@
-"""
-main.py
--------
-Single entry point for the project. Launches the animation player on a
-(.bin, atlas) pair, where the atlas is a .pvr OR a .png.
-
-    python main.py                              # interactive — pops up file pickers
-    python main.py --bin char.bin --pvr char.pvr   # scripted, both files explicit
-    python main.py --bin char.bin --pvr char.png   # PNG atlas also accepted
-    python main.py --bin char.bin               # auto-pairs char.pvr/.png from the same folder
-
-Atlas resolution
-================
-The `--pvr` flag accepts either format. Auto-pairing tries `.pvr` first, then
-`.png`. Some game versions ship the atlas as a real decoded PNG; others ship
-PVR bytes inside a `.png` filename — the actual format is sniffed from the
-file's magic bytes, not the extension, so both work transparently.
-
-The parser (`parsers/fbin_parser.parse_binary`) and the PVR decoder
-(`pvr/pvr_loader.load_pvr_texture` / `convert_pvr_to_png`) are still
-importable on their own — this script just wires them together with the
-player and a small CLI.
-"""
+"""Single entry point for the project."""
 from __future__ import annotations
 
 import argparse
@@ -28,8 +6,7 @@ import os
 import sys
 from pathlib import Path
 
-# Register library subfolders (parsers/, pvr/, render/) on sys.path so the
-# flat project imports (`from fbin_parser import ...`) resolve.
+# Register library subfolders (parsers/, pvr/, render/) on sys.path so the flat project imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _paths  # noqa: F401
 
@@ -48,24 +25,25 @@ def _pick_file(title: str, filetypes: list, start_dir: str) -> str | None:
         path = input(f"{title} (path): ").strip().strip('"').strip("'")
         return path or None
 
-    root = tk.Tk()
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        # Headless / no display — fall back to plain input()
+        path = input(f"{title} (path): ").strip().strip('"').strip("'")
+        return path or None
     root.withdraw()                 # hide the empty root window
     root.attributes("-topmost", True)
-    path = filedialog.askopenfilename(title=title,
-                                      filetypes=filetypes,
-                                      initialdir=start_dir)
-    root.destroy()
+    try:
+        path = filedialog.askopenfilename(title=title,
+                                          filetypes=filetypes,
+                                          initialdir=start_dir)
+    finally:
+        root.destroy()
     return path or None
 
 
 def _sibling_with_suffix(path_str: str, suffixes) -> str | None:
-    """If `path_str` exists, look for a file with the same stem and ONE of the
-    given suffixes (tried in order) in the same folder. Accepts a single
-    suffix string or an iterable. Returns the first match or None.
-
-        _sibling_with_suffix("foo.bin", ".pvr")               -> "foo.pvr"
-        _sibling_with_suffix("foo.bin", (".pvr", ".png"))     -> "foo.pvr" or "foo.png"
-    """
+    """If `path_str` exists, look for a file with the same stem and ONE of the given suffixes"""
     if not path_str:
         return None
     p = Path(path_str)
@@ -81,10 +59,7 @@ def _sibling_with_suffix(path_str: str, suffixes) -> str | None:
 
 
 def _resolve_inputs(args: argparse.Namespace) -> tuple[Path, Path]:
-    """Return (bin_path, pvr_path). For each missing CLI flag:
-       1. try to find a same-stem sibling next to the file that WAS provided;
-       2. otherwise fall back to a tkinter file picker.
-    """
+    """Return (bin_path, pvr_path)."""
     start_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                              "samples")
     if not os.path.isdir(start_dir):
@@ -93,9 +68,7 @@ def _resolve_inputs(args: argparse.Namespace) -> tuple[Path, Path]:
     bin_str = args.bin
     pvr_str = args.pvr
 
-    # Auto-pair by stem when only one flag is supplied. Atlas may be .pvr or
-    # .png; prefer .pvr if both exist (older versions ship .pvr; newer ones
-    # may ship a decoded .png).
+    # Auto-pair by stem when only one flag is supplied.
     if bin_str and not pvr_str:
         guess = _sibling_with_suffix(bin_str, (".pvr", ".png"))
         if guess:
@@ -113,7 +86,7 @@ def _resolve_inputs(args: argparse.Namespace) -> tuple[Path, Path]:
                              start_dir)
     if not pvr_str:
         pvr_str = _pick_file("Select atlas (.pvr or .png)",
-                             [("Atlas texture", "*.pvr;*.png"),
+                             [("Atlas texture", ("*.pvr", "*.png")),
                               ("PVR texture",   "*.pvr"),
                               ("PNG atlas",     "*.png"),
                               ("All files",     "*.*")],
@@ -133,11 +106,7 @@ def _resolve_inputs(args: argparse.Namespace) -> tuple[Path, Path]:
 _PNG_MAGIC = b'\x89PNG\r\n\x1a\n'
 
 def _load_atlas(atlas_path: str, pygame):
-    """Load an atlas texture as a pygame.Surface, choosing PNG vs PVR by
-    sniffing the file's magic bytes rather than trusting its extension.
-    Some game versions name a PVR-encoded file `*.png` and vice-versa.
-    Returns the Surface or None on failure.
-    """
+    """Load an atlas texture as a pygame.Surface"""
     from pvr_loader import load_pvr_texture
     try:
         with open(atlas_path, 'rb') as fh:
@@ -152,8 +121,7 @@ def _load_atlas(atlas_path: str, pygame):
         except Exception as exc:
             print(f"Error: failed to load PNG atlas '{atlas_path}': {exc}")
             return None
-    # Anything else is treated as PVR (PVR2 'PVR!' at offset 44, PVR3 'PVR\x03'
-    # at offset 0, Dreamcast 'GBIX'/'PVRT', etc. — load_pvr_texture sorts it out).
+    # Anything else is treated as PVR (PVR2 'PVR!' at offset 44, PVR3 'PVR\x03' at offset 0
     surf = load_pvr_texture(atlas_path)
     return surf.convert_alpha() if surf is not None else None
 
@@ -163,9 +131,7 @@ def _load_atlas(atlas_path: str, pygame):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_player(bin_path: Path, pvr_path: Path) -> None:
-    """Launch the project's animation player on (bin, atlas).
-    The atlas may be a .pvr or .png — content is sniffed, not the extension.
-    """
+    """Launch the project's animation player on (bin, atlas)."""
     try:
         import pygame
     except ImportError:
@@ -189,7 +155,8 @@ def run_player(bin_path: Path, pvr_path: Path) -> None:
     cfg = PlayerConfig(pvr_name=pvr_path.stem, output_dir=str(bin_path.parent))
     try:
         player = Player(images, movie_clips, actions, texture, cfg,
-                        rawbin=is_rawbin, define_key=bin_path.stem)
+                        rawbin=is_rawbin, define_key=bin_path.stem,
+                        loader=lambda: parse_fbin(str(bin_path)))
         player.run()
     except RuntimeError as exc:
         print(f"Player error: {exc}"); pygame.quit(); sys.exit(1)
@@ -215,7 +182,15 @@ def main() -> None:
                         "from magic bytes, not extension). If omitted, the "
                         "sibling .bin's stem is used to find it (tries .pvr "
                         "then .png), otherwise a file picker opens.")
+    p.add_argument("--game-quirks", action="store_true",
+                   help="Reproduce the game's own decoding bug: MinBin tag-1 "
+                        "bytes are read unsigned, so small negative values in "
+                        "FBIN files come out wrong (trembling helmets, offset "
+                        "eyes). Default: decode as the encoder intended.")
     args = p.parse_args()
+    if args.game_quirks:
+        from input_buffer import set_game_quirks
+        set_game_quirks(True)
 
     bin_path, pvr_path = _resolve_inputs(args)
 

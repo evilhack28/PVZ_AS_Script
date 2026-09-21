@@ -1,31 +1,21 @@
-"""
-input_buffer.py
----------------
-Binary stream reader with bounds-checked primitives and MinBin float decoding.
+"""Binary stream reader with bounds-checked primitives and MinBin float decoding."""
 
-Also hosts shared parser size limits + the default frame rate so both
-`fbin_parser` and `rawbin_parser` import them from a single source of truth.
-"""
-
+import os
 import struct
 import logging
 
 log = logging.getLogger(__name__)
 
-# ── Shared parser limits (imported by fbin_parser + rawbin_parser) ───────────
-MAX_IMAGES         = 1024
-MAX_MOVIE_CLIPS    = 2000
-MAX_ACTIONS        = 5000
-MAX_FRAMES         = 8000
-MAX_ELEMENTS       = 4096
 DEFAULT_FRAME_RATE = 30
 
-# ── Internal constants ───────────────────────────────────────────────────────
-_ALLOWED_STRING_CHARS = frozenset(
-    "abcdefghijklmnopqrstuvwxyz"
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    "0123456789_-/ ."
-)
+# Tag 1 of a MinBin float is ONE byte.
+TAG1_SIGNED = os.environ.get('PVZ_GAME_QUIRKS', '') not in ('1', 'true', 'yes')
+
+
+def set_game_quirks(enabled: bool) -> None:
+    """True -> read MinBin tag 1 like the game (unsigned, buggy)"""
+    global TAG1_SIGNED
+    TAG1_SIGNED = not enabled
 
 
 class BufferError(Exception):
@@ -33,14 +23,7 @@ class BufferError(Exception):
 
 
 class InputBuffer:
-    """
-    Wraps a bytes object and provides sequential, bounds-checked reads.
-
-    Attributes
-    ----------
-    data   : bytes  – raw binary payload
-    offset : int    – current read position
-    """
+    """Wraps a bytes object and provides sequential, bounds-checked reads."""
 
     def __init__(self, data: bytes) -> None:
         self.data = data
@@ -92,51 +75,32 @@ class InputBuffer:
         except UnicodeDecodeError:
             return f"<BINARY:{raw.hex()}>"
 
-    def read_float_min(self, divisor: float) -> float:
-        """
-        Read a MinBin-encoded float.
+    def read_float(self) -> float:
+        """Read a raw little-endian float32 (InputBuffer::ReadFloat, RawBin)."""
+        if self.offset + 4 > self.length:
+            raise BufferError("End of buffer reading float")
+        val = struct.unpack_from('<f', self.data, self.offset)[0]
+        self.offset += 4
+        return val
 
-        Tag meanings
-        ============
-        0  → 0.0
-        1  → int8  / divisor
-        2  → int16 / divisor
-        3  → int32 / divisor
-        4  → int32 / divisor (same as tag 3; used when value exceeds int16 range)
-        """
+    def read_float_min(self, divisor: float) -> float:
+        """MinBin float — exact port of the game's InputBuffer::ReadFloatMin (libcocos2dcpp.so 1.0.105, 0x00ac828a)."""
         tag = self.read_byte()
-        if tag == 0:
-            return 0.0
-        elif tag == 1:
-            val = struct.unpack_from('<b', self.data, self.offset)[0]
-            self.offset += 1
-            return val / divisor
-        elif tag == 2:
-            val = struct.unpack_from('<h', self.data, self.offset)[0]
-            self.offset += 2
-            return val / divisor
-        elif tag in (3, 4):
-            return float(self.read_int()) / divisor
-        else:
-            log.warning("Unknown FloatMin tag %d at offset %d – defaulting to 0.0",
-                        tag, self.offset - 1)
-            return 0.0
+        if tag == 1:
+            b = self.read_byte()
+            if TAG1_SIGNED and b >= 128:
+                b -= 256
+            return b / divisor
+        if tag == 2:
+            return self.read_short() / divisor
+        if tag == 4:
+            return self.read_int() / divisor
+        if tag not in (0,):
+            log.debug("FloatMin tag %d at offset %d -> 0.0 (game behaviour)",
+                      tag, self.offset - 1)
+        return 0.0
 
     # ── Navigation ────────────────────────────────────────────────────────────
 
     def tell(self) -> int:
         return self.offset
-
-    def seek(self, new_offset: int) -> None:
-        self.offset = max(0, min(new_offset, self.length))
-
-    # ── Helpers ───────────────────────────────────────────────────────────────
-
-    @staticmethod
-    def is_printable_ascii(raw: bytes) -> bool:
-        """Return True if *raw* decodes to printable ASCII (file-name safe)."""
-        try:
-            text = raw.decode('utf-8', errors='ignore')
-        except Exception:
-            return False
-        return bool(text) and all(ch in _ALLOWED_STRING_CHARS for ch in text)

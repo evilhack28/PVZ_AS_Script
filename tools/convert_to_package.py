@@ -1,24 +1,4 @@
-"""
-convert_to_package.py
----------------------
-Convert a Cocos2d-x FBIN / RawBin animation (bin + pvr/png atlas) into the
-PvZ ".package" format used by the Plant/Zombie resource bundles.
-
-Two layout flavors:
-    --version 4  ->  PlantPeashooter_4.package layout
-    --version 5  ->  PlantPeashooter_5.package layout
-
-Both produce the same XFL tree inside:
-    <PKG>/resource/images/initial/<TYPE_PATH>/<CHAR>/{,<CHAR>/}DOMDocument.xml
-    .../library/{image,sprite,label,media}/
-
-Usage:
-    python convert_to_package.py --bin char.bin --pvr char.pvr        # both layouts
-    python convert_to_package.py --bin char.bin --pvr char.pvr --version 4
-    python convert_to_package.py --bin char.bin --pvr char.pvr --version 5
-
-By default both v4 and v5 are emitted side-by-side. Pass --version to pick one.
-"""
+"""Convert a Cocos2d-x FBIN / RawBin animation"""
 
 from __future__ import annotations
 
@@ -41,9 +21,7 @@ _PNG_MAGIC = b'\x89PNG\r\n\x1a\n'
 
 
 def _load_atlas_pil(atlas_path: str):
-    """Return a PIL.Image (RGBA) for the atlas, regardless of extension.
-    PNG bytes are loaded directly; everything else goes through the project's
-    PVR decoder which returns a pygame.Surface that we convert to PIL."""
+    """Return a PIL.Image (RGBA) for the atlas, regardless of extension."""
     from PIL import Image
 
     with open(atlas_path, 'rb') as fh:
@@ -69,8 +47,7 @@ def _load_atlas_pil(atlas_path: str):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Matrix conversion: FBIN (Cocos Y-up) -> Flash XFL (Y-down)
-#   a' = a, b' = -b, c' = -c, d' = d, tx' = tx, ty' = -ty
+# Matrix conversion: FBIN (Cocos Y-up) -> Flash XFL
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _flash_matrix(m):
@@ -90,9 +67,7 @@ _SAFE_CHARS = re.compile(r'[^A-Za-z0-9_]+')
 
 
 def _safe_name(name: str, fallback: str) -> str:
-    """Return a Flash-safe symbol name. Strips non-identifier chars and
-    prepends `_` when the result would start with a digit (Flash CS5 and the
-    PvZ packer reject symbol names that begin with `0-9`)."""
+    """Return a Flash-safe symbol name."""
     s = _SAFE_CHARS.sub('_', (name or '').strip())
     if not s:
         return fallback
@@ -116,17 +91,7 @@ _XFL_HEAD = ('<DOMSymbolItem xmlns:xsi="http://www.w3.org/2001/XMLSchema-instanc
 
 def _emit_image_symbol(symbol_name: str, media_name: str,
                        offset_x: float, offset_y: float) -> str:
-    """image/NAME.xml — one DOMLayer with a single DOMBitmapInstance positioned
-    so the symbol's (0,0) is the Flash registration point.
-
-    Per the renderer (render/renderer.py:391-394) the bitmap CENTER in Cocos
-    Y-up local space is `(offset_x + w/2, -offset_y - h/2)`. Y-flipping to
-    Flash Y-down gives `(offset_x + w/2, offset_y + h/2)`, so the bitmap's
-    top-left in symbol-local must be `(+offset_x, +offset_y)`. The previous
-    `-offset_x, -offset_y` placed the bitmap on the opposite side of the
-    registration whenever offsets were negative (e.g. applemortar IMG[3]
-    `ox=-49.2`), which made nested sprites land far from their intended spot.
-    """
+    """image/NAME.xml — one DOMLayer with a single DOMBitmapInstance positioned so the symbol's"""
     out = [
         _XFL_HEAD.format(name=f"image/{symbol_name}"),
         '    <timeline>\n',
@@ -157,71 +122,27 @@ def _emit_image_symbol(symbol_name: str, media_name: str,
 def _element_payload(elem, images, movie_clips,
                      img_symbol_names, mc_symbol_names,
                      is_rawbin: bool = False):
-    """Convert one element to (library_item_name,) — or None to skip.
-    libraryItemName is prefixed with 'sprite/' or 'image/'.
-
-    For RawBin the parser flags every element `is_mc=True` and stores the
-    on-disk `mc_id` byte in `id`, but `mc_id` is a *dispatch route*, not a
-    direct MC index. The real target lives in `frame_index`. Mirrors the
-    renderer's RawBin branch (render/renderer.py:263-288):
-        eid == 1 + fi in MC range   -> sprite for movie_clips[fi]
-        eid == 1 + fi in image range -> image for images[fi]
-        eid != 1 + fi in image range -> image for images[fi]
-        else (1-frame MC reuse)      -> sprite for movie_clips[fi]
-    Without this, every RawBin element is treated as `sprite/MC[mc_id]`,
-    which routinely produces self-referential sprites (e.g. MC[1]
-    `coconut_cloud_front` referencing `sprite/coconut_cloud_front`) and
-    Flash CS5 hard-crashes trying to expand the cycle.
-    """
+    """Convert one element to (library_item_name, first_frame) — or None to skip."""
     eid = elem.get('id', -1)
     if eid < 0:
         return None
-
-    if is_rawbin:
-        fi = elem.get('frame_index', -1)
-        if eid == 1 and fi >= 0:
-            if fi < len(movie_clips):
-                sym = mc_symbol_names.get(fi)
-                if sym is None:
-                    return None
-                return (f"sprite/{sym}",)
-            if fi < len(images):
-                sym = img_symbol_names.get(fi)
-                if sym is None:
-                    return None
-                return (f"image/{sym}",)
-            return None
-        if 0 <= fi < len(images):
-            sym = img_symbol_names.get(fi)
-            if sym is None:
-                return None
-            return (f"image/{sym}",)
-        if (0 <= eid < len(movie_clips)
-                and len(movie_clips[eid].get('frames', [])) == 1
-                and 0 <= fi < len(movie_clips)):
-            sym = mc_symbol_names.get(fi)
-            if sym is None:
-                return None
-            return (f"sprite/{sym}",)
-        return None
-
     if elem.get('is_mc'):
         if 0 <= eid < len(movie_clips):
             sym = mc_symbol_names.get(eid)
             if sym is None:
                 return None
-            return (f"sprite/{sym}",)
+            return (f"sprite/{sym}", max(0, int(elem.get('frame_index', 0))))
         return None
     if 0 <= eid < len(images):
         sym = img_symbol_names.get(eid)
         if sym is None:
             return None
-        return (f"image/{sym}",)
+        return (f"image/{sym}", 0)
     return None
 
 
 def _emit_dom_frame(index: int, duration: int, elem,
-                    libname: str, is_image: bool) -> str:
+                    libname: str, is_image: bool, first_frame: int = 0) -> str:
     """One <DOMFrame> with a single child <DOMSymbolInstance>."""
     a, b, c, d, tx, ty = _flash_matrix(elem['matrix'])
     alpha = elem.get('alpha', 1.0)
@@ -243,9 +164,10 @@ def _emit_dom_frame(index: int, duration: int, elem,
     if ro or go or bo:
         color_attrs += (f' redOffset="{ro}" greenOffset="{go}" blueOffset="{bo}"')
 
-    # Sprite vs image: image XMLs use plain DOMSymbolInstance without
-    # firstFrame attr in the example, but sprite-instances include firstFrame.
-    extra = '' if is_image else ' firstFrame="0"'
+    # Sprite vs image: image XMLs use plain DOMSymbolInstance without firstFrame attr in the example
+    extra = '' if is_image else f' firstFrame="{int(first_frame)}"'
+    if elem.get('blend'):
+        extra += ' blendMode="add"'                # additive blend (GL_ONE dst)
     out = [
         f'                        <DOMFrame index="{index}" duration="{duration}">\n',
         '                            <elements>\n',
@@ -275,18 +197,10 @@ def _build_layers_xml(frames_subset: list,
                       images, movie_clips,
                       img_symbol_names, mc_symbol_names,
                       is_rawbin: bool = False) -> str:
-    """Build the <layers>...</layers> block for a timeline whose frame list is
-    `frames_subset` (a slice of mc['frames']).
-
-    Element-slot tracking: position i in frame N corresponds to position i in
-    frame N+1. Each slot becomes one DOMLayer. Consecutive identical frames in
-    a layer are merged with `duration=N`. Layers in XML are emitted highest
-    layer name first (Flash convention puts the topmost layer at the top of the
-    XML)."""
+    """Build the <layers>...</layers> block for a timeline whose frame list is `frames_subset`"""
     n_frames = len(frames_subset)
     if n_frames == 0:
-        # Empty timeline: emit one placeholder layer with one empty frame so the
-        # symbol is still well-formed (some XFL loaders reject <layers/>).
+        # Empty timeline: emit one placeholder layer with one empty frame so the symbol is still well-formed
         return ('            <layers>\n'
                 '                <DOMLayer name="1">\n'
                 '                    <frames>\n'
@@ -300,9 +214,7 @@ def _build_layers_xml(frames_subset: list,
     max_slots = max((len(f) for f in frames_subset), default=0)
 
     if max_slots == 0:
-        # Frames exist but all are empty (no elements) — emit a single layer with
-        # one empty frame spanning the whole duration so loaders don't see
-        # <layers/> or zero layers.
+        # Frames exist but all are empty (no elements)
         return ('            <layers>\n'
                 '                <DOMLayer name="1">\n'
                 '                    <frames>\n'
@@ -322,27 +234,35 @@ def _build_layers_xml(frames_subset: list,
                                 is_rawbin)
         if info is None:
             return None
-        libname = info[0]
+        libname, first_frame = info
         is_image = libname.startswith('image/')
         # Key used to detect "identical frame" (same instance + matrix + alpha + color)
         a, b, c, d, tx, ty = _flash_matrix(elem['matrix'])
         alpha = elem.get('alpha', 1.0)
         cm = elem.get('color_mult')
         ca = elem.get('color_add')
-        key = (libname, round(a, 6), round(b, 6), round(c, 6), round(d, 6),
-               round(tx, 4), round(ty, 4), round(float(alpha or 1.0), 4),
-               bytes(cm) if cm else None, bytes(ca) if ca else None)
-        return (libname, is_image, elem, key)
+        key = (libname, first_frame,
+               round(a, 6), round(b, 6), round(c, 6), round(d, 6),
+               round(tx, 4), round(ty, 4),
+               round(float(1.0 if alpha is None else alpha), 4),
+               bytes(cm) if cm else None, bytes(ca) if ca else None,
+               bool(elem.get('blend')))
+        return (libname, is_image, elem, key, first_frame)
 
     layer_blocks = []
     for slot in range(max_slots):
         # Pre-compute payloads per frame for this slot
         payloads = [_payload_for(slot, fi) for fi in range(n_frames)]
 
+        # Skip empty slots; remember the last real element so the lookahead is O(1).
+        last_real = max((i for i, p in enumerate(payloads) if p is not None),
+                        default=-1)
+        if last_real < 0:
+            continue
+
         frame_xml_parts = []
         fi = 0
         last_keyframe_idx = -1
-        last_was_empty = False
         while fi < n_frames:
             payload = payloads[fi]
 
@@ -359,24 +279,16 @@ def _build_layers_xml(frames_subset: list,
                     break
 
             if payload is None:
-                # Empty span: only emit if the slot is going to come back
-                # later or has come before. Otherwise trim trailing empties.
-                # We always emit interior empties so frame indices stay in sync.
-                has_later = any(p is not None for p in payloads[fi:])
-                if last_keyframe_idx >= 0 or has_later:
+                # Empty span: only emit if the slot is going to come back later or has come before.
+                if last_keyframe_idx >= 0 or last_real > fi:
                     frame_xml_parts.append(_empty_dom_frame(fi, run))
-                    last_was_empty = True
             else:
-                libname, is_image, elem, _key = payload
+                libname, is_image, elem, _key, first_frame = payload
                 frame_xml_parts.append(
-                    _emit_dom_frame(fi, run, elem, libname, is_image))
+                    _emit_dom_frame(fi, run, elem, libname, is_image,
+                                    first_frame))
                 last_keyframe_idx = fi
-                last_was_empty = False
             fi += run
-
-        # Skip slot entirely if it has no content
-        if not any(p is not None for p in payloads):
-            continue
 
         layer_blocks.append((slot + 1, ''.join(frame_xml_parts)))
 
@@ -384,8 +296,7 @@ def _build_layers_xml(frames_subset: list,
     layer_blocks.sort(key=lambda lb: -lb[0])
 
     if not layer_blocks:
-        # Every element resolved to None (e.g. all references were to filtered
-        # or invalid MCs). Emit a placeholder so the symbol stays well-formed.
+        # Every element resolved to None (e.g. all references were to filtered or invalid MCs).
         return ('            <layers>\n'
                 '                <DOMLayer name="1">\n'
                 '                    <frames>\n'
@@ -474,10 +385,7 @@ def _probe_frame_bbox(mc_idx: int, frame_idx: int,
                       parent_matrix: tuple = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0),
                       depth: int = 0,
                       visited: frozenset = frozenset()) -> _BBox:
-    """Walk the MC tree applying Flash-space matrices and accumulate the union
-    bbox of every image draw. Pure-Python, no pygame needed. Used to find a
-    sensible stage-center offset so the character actually lands on the canvas.
-    """
+    """Walk the MC tree applying Flash-space matrices and accumulate the union bbox of every image draw."""
     bbox = _BBox()
     if depth > 32 or not (0 <= mc_idx < len(movie_clips)) or mc_idx in visited:
         return bbox
@@ -493,7 +401,6 @@ def _probe_frame_bbox(mc_idx: int, frame_idx: int,
         eid = elem.get('id', -1)
         if eid < 0:
             continue
-        target_fi = elem.get('frame_index', -1)
         la, lb, lc, ld, ltx, lty = _flash_matrix(elem['matrix'])
         na  = pa * la + pc * lb
         nb  = pb * la + pd * lb
@@ -503,28 +410,20 @@ def _probe_frame_bbox(mc_idx: int, frame_idx: int,
         nty = pb * ltx + pd * lty + pty
         child_matrix = (na, nb, nc, nd, ntx, nty)
 
-        if is_rawbin:
-            if eid == 1 and 0 <= target_fi < len(movie_clips):
-                bbox.union(_probe_frame_bbox(target_fi, 0, images, movie_clips,
+        if elem.get('is_mc'):
+            if 0 <= eid < len(movie_clips):
+                # A child MC is drawn at exactly its own frame_index.
+                bbox.union(_probe_frame_bbox(eid, elem.get('frame_index', 0),
+                                             images, movie_clips,
                                              is_rawbin, child_matrix,
                                              depth + 1, visited))
-            elif 0 <= target_fi < len(images):
-                bbox.union(_image_world_rect(target_fi, images, child_matrix))
-        else:
-            if elem.get('is_mc') and 0 <= eid < len(movie_clips):
-                child_fi = target_fi if target_fi >= 0 else 0
-                bbox.union(_probe_frame_bbox(eid, child_fi, images, movie_clips,
-                                             is_rawbin, child_matrix,
-                                             depth + 1, visited))
-            elif 0 <= eid < len(images):
-                bbox.union(_image_world_rect(eid, images, child_matrix))
+        elif 0 <= eid < len(images):
+            bbox.union(_image_world_rect(eid, images, child_matrix))
     return bbox
 
 
 def _image_world_rect(img_idx: int, images: list, matrix: tuple) -> _BBox:
-    """Map the four corners of an image bitmap into Flash world coords and
-    return their bbox. Bitmap top-left is at local (+offset_x, +offset_y);
-    matches `_emit_image_symbol`'s convention."""
+    """Map the four corners of an image bitmap into Flash world coords and return their bbox."""
     img = images[img_idx]
     w  = float(img.get('width', 0))
     h  = float(img.get('height', 0))
@@ -544,12 +443,7 @@ def _image_world_rect(img_idx: int, images: list, matrix: tuple) -> _BBox:
 def _emit_dom_document(media_names, image_symbols, sprite_symbols, label_actions,
                        frame_rate: int, doc_w: int = 390, doc_h: int = 390,
                        stage_offset: tuple = (0.0, 0.0)) -> str:
-    """Root document. Labels are concatenated on the timeline; each gets a
-    DOMSymbolInstance of label/NAME and a label marker on the label layer.
-
-    label_actions: list of (label_name, duration). The label name is also the
-    symbol name (label/<name>).
-    """
+    """Root document."""
     parts = []
     parts.append(
         f'<DOMDocument xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" '
@@ -596,10 +490,6 @@ def _emit_dom_document(media_names, image_symbols, sprite_symbols, label_actions
     parts.append('                </DOMLayer>\n')
 
     # Action layer: stop(); at end of each segment.
-    # For dur>=2 we split into a body frame (dur-1) plus a trailing stop
-    # keyframe. For a 1-frame label the body+stop split would advance cursor
-    # by only 1 while occupying 2 indices — colliding with the next label's
-    # first frame. Emit just the stop keyframe in that case.
     parts.append('                <DOMLayer name="action">\n')
     parts.append('                    <frames>\n')
     cursor = 0
@@ -629,9 +519,7 @@ def _emit_dom_document(media_names, image_symbols, sprite_symbols, label_actions
     parts.append('                    </frames>\n')
     parts.append('                </DOMLayer>\n')
 
-    # Instance layer: one DOMSymbolInstance per label, shifted by stage_offset
-    # so the character bounding box lands on-canvas instead of jammed in the
-    # top-left corner (Cocos world origin is wherever the source picks it).
+    # Instance layer: one DOMSymbolInstance per label
     sox, soy = stage_offset
     parts.append('                <DOMLayer name="instance">\n')
     parts.append('                    <frames>\n')
@@ -680,9 +568,7 @@ def _top_data_v5(subgroup_name: str, resource_id: str, resource_path: str,
 def _top_data_v4_multi(subgroup_name: str,
                        resources: list,
                        resolution: int = 1536) -> dict:
-    """v4 group/multi-resource top-data. `resources` is a list of
-    (resource_id, resource_path) tuples — same layout as a single-character
-    package, just with multiple entries in the resource dict."""
+    """v4 group/multi-resource top-data."""
     return {
         "#expand_method": "advanced",
         "version": 4,
@@ -704,8 +590,7 @@ def _top_data_v4_multi(subgroup_name: str,
 def _top_data_v5_multi(subgroup_name: str,
                        resources: list,
                        resolution: int = 1536) -> dict:
-    """v5 group/multi-resource top-data. Mirrors ZombieTutorialGroup.package's
-    layout: single subgroup, resource is a list of PopAnim entries."""
+    """v5 group/multi-resource top-data."""
     return {
         "version": 5,
         "expand_data": True,
@@ -740,11 +625,7 @@ def _inner_data_v4(images: list, img_symbol_names: dict, id_prefix: str,
             },
             "additional": None,
         }
-    # The PvZ packer reads the sprite field to enumerate sprite-symbol
-    # resources for ID registration. Reference packages list every emitted
-    # sprite under the empty-string key (default category). Leaving this
-    # empty makes the packer skip every sprite — visible breakage on the
-    # effect side of ZombieEgyptTombRaiserGroup.
+    # The PvZ packer reads the sprite field to enumerate sprite-symbol resources for ID registration.
     sprite_field = {"": list(sprite_names)} if sprite_names else {}
     return {
         "version": 6,
@@ -783,8 +664,7 @@ def _inner_data_v5(images: list, img_symbol_names: dict, id_prefix: str,
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _extract_sprite_png(atlas, img: dict):
-    """Crop the atlas to the image's atlas-pixel rect. Returns a PIL.Image or
-    None if the rect is degenerate / out of bounds."""
+    """Crop the atlas to the image's atlas-pixel rect."""
     tw, th = atlas.size
     tx = int(img.get('tex_x', 0))
     ty = int(img.get('tex_y', 0))
@@ -806,31 +686,13 @@ def _write_character_assets(out_dir: Path, parsed: dict, atlas,
                             type_path: str, char_name: str,
                             id_prefix: str, resource_id: str,
                             resolution: int = 1536) -> tuple:
-    """Write everything BELOW the package's top-level data.json for one
-    character: inner data.json, main.xfl, library/image|sprite|label|media,
-    DOMDocument.xml. Returns (resource_id, resource_path) so the caller can
-    assemble the top-level data.json (single OR group)."""
+    """Write everything BELOW the package's top-level data.json for one character"""
     images      = parsed['images']
     movie_clips = parsed['movie_clips']
     actions     = parsed['actions']
     is_rawbin   = bool(parsed.get('is_rawbin', False))
 
-    # Symbol names (de-duplicated, sanitised)
-    used = set()
-
-    def _unique(name: str, prefix: str) -> str:
-        base = _safe_name(name, prefix)
-        candidate = base
-        n = 2
-        while candidate in used:
-            candidate = f"{base}_{n}"
-            n += 1
-        used.add(candidate)
-        return candidate
-
-    # Image symbol names use the canonical "<char>_<W>x<H>" convention so the
-    # output never inherits indexed FBIN names like "000_130x122". Duplicates
-    # get a "_2", "_3", ... suffix (matches peashooter_21x17 / peashooter_21x17_2).
+    # Image symbols are named <char>_<W>x<H>, with _2, _3 for duplicates.
     img_symbol_names: dict = {}
     used_img: set = set()
     for i, im in enumerate(images):
@@ -845,15 +707,18 @@ def _write_character_assets(out_dir: Path, parsed: dict, atlas,
         used_img.add(cand)
         img_symbol_names[i] = cand
 
-    # MC names — and exclude action-root MCs from sprite generation (they become
-    # labels instead).
-    action_mc_set = {a['mc_idx'] for a in actions
-                     if 0 <= a.get('mc_idx', -1) < len(movie_clips)}
+    # Playable actions only.
+    actions = [a for a in actions if a.get('frames')]
+
+    # MC names — and exclude action-root MCs from sprite generation
+    action_mc_set = {a['mc_idx'] for a in actions}
+    referenced_mcs = {e['id'] for mc in movie_clips for fr in mc['frames']
+                      for e in fr if e.get('is_mc') and e['id'] >= 0}
 
     mc_symbol_names: dict = {}
     used_mc: set = set(img_symbol_names.values())  # image names take precedence
     for i, mc in enumerate(movie_clips):
-        if i in action_mc_set:
+        if i in action_mc_set and i not in referenced_mcs:
             continue  # action root MCs render via label/* — no sprite symbol
         base = _safe_name(mc.get('name', ''), f"sprite_{i}")
         cand = base
@@ -868,9 +733,7 @@ def _write_character_assets(out_dir: Path, parsed: dict, atlas,
     used_lbl: set = set()
     label_records = []  # list of (label_name, mc_idx, start, end)
     for a in actions:
-        mc_idx = a.get('mc_idx', -1)
-        if not (0 <= mc_idx < len(movie_clips)):
-            continue
+        mc_idx = a['mc_idx']
         base = _safe_name(a.get('name', ''), f"action_{mc_idx}")
         cand = base
         n = 2
@@ -878,53 +741,25 @@ def _write_character_assets(out_dir: Path, parsed: dict, atlas,
             cand = f"{base}_{n}"
             n += 1
         used_lbl.add(cand)
-        mc = movie_clips[mc_idx]
-        last_frame = max(0, len(mc['frames']) - 1)
-        # FBIN/RawBin actions encode start/end as positions in a concatenated
-        # global playlist, not as local frame indices into their own MC. Detect
-        # that case and collapse to the MC's full local range. Same heuristic
-        # as the player's _clamp_action_range, plus `raw_start > last_frame`
-        # which is unambiguous (a local start can't exceed the MC's last frame).
-        raw_start = a.get('start', 0)
-        raw_end   = a.get('end', last_frame)
-        duration  = raw_end - raw_start
-        # `raw_end > last_frame` catches a global action whose duration is
-        # shorter than its MC (e.g. zombie_primitive walk: start=63 end=127
-        # last_frame=69) — the duration-only checks miss it and the label would
-        # otherwise collapse to frames 63-69 instead of the full 70-frame walk.
-        is_global = (raw_start > last_frame
-                     or raw_end > last_frame
-                     or duration > last_frame
-                     or (raw_start > 0 and duration >= last_frame))
-        if is_global:
-            s, e = 0, last_frame
-        else:
-            s = max(0, min(raw_start, last_frame))
-            e = max(0, min(raw_end, last_frame))
-            if e < s:
-                s, e = 0, last_frame
-        label_records.append((cand, mc_idx, s, e))
+        frame_list = list(a['frames'])
+        label_records.append((cand, mc_idx, frame_list))
 
-    # Frame rate is always 30 in the output XFL regardless of what the source
-    # MC declares — Flash projects in this pipeline are authored at 30 fps.
+    # Frame rate is always 30 in the output XFL regardless of what the source MC declares
     frame_rate = 30
 
-    # Make sure label/sprite name spaces don't collide (labels are siblings of
-    # sprites in the symbol table — rename labels if they collide)
+    # Make sure label/sprite name spaces don't collide (labels are siblings of sprites in the symbol table
     seen_symbols = set(img_symbol_names.values()) | set(mc_symbol_names.values())
     final_label_records = []
-    for label, mc_idx, s, e in label_records:
+    for label, mc_idx, frame_list in label_records:
         cand = label
         n = 2
         while cand in seen_symbols:
             cand = f"{label}_{n}"
             n += 1
         seen_symbols.add(cand)
-        final_label_records.append((cand, mc_idx, s, e))
+        final_label_records.append((cand, mc_idx, frame_list))
 
-    # Particle labels always sit at the end of the timeline. Source FBINs
-    # commonly place "particles" mid-action list, but Flash projects expect
-    # particle FX as a trailing label (matches ZombieTutorialGroup, peashooter).
+    # Particle labels always sit at the end of the timeline.
     def _is_particle(rec):
         return rec[0].lower().startswith('particle')
     label_records = ([r for r in final_label_records if not _is_particle(r)]
@@ -932,9 +767,7 @@ def _write_character_assets(out_dir: Path, parsed: dict, atlas,
 
     # ── Build directory tree ─────────────────────────────────────────────────
     out_dir.mkdir(parents=True, exist_ok=True)
-    # Single-nested for both v4 and v5: images/initial/<type>/<char> (or
-    # images/initial/<char> when type_path is empty). Drops the historical
-    # v5 double-nest (`<char>/<char>`) so paths stay short.
+    # Single-nested for both v4 and v5: images/initial/<type>/<char>
     parts = ['images', 'initial']
     if type_path:
         parts.append(type_path)
@@ -949,10 +782,6 @@ def _write_character_assets(out_dir: Path, parsed: dict, atlas,
     (lib / "media").mkdir(parents=True, exist_ok=True)
 
     # ── Inner data.json (image table) ────────────────────────────────────────
-    # Reference packages populate `sprite.""` ONLY for effect characters; the
-    # zombie/plant reference leaves it as `{}`. Mirror that convention exactly
-    # — the PvZ packer is picky about which characters declare top-level
-    # sprite resources.
     if type_path == 'effects':
         sprite_names_for_inner = [mc_symbol_names[i]
                                   for i in range(len(movie_clips))
@@ -1012,9 +841,9 @@ def _write_character_assets(out_dir: Path, parsed: dict, atlas,
 
     # ── library/label/<NAME>.xml ─────────────────────────────────────────────
     label_actions_out = []  # (label_name, duration) for the root timeline
-    for label, mc_idx, s, e in label_records:
+    for label, mc_idx, frame_list in label_records:
         mc = movie_clips[mc_idx]
-        frames_subset = mc['frames'][s:e + 1]
+        frames_subset = [mc['frames'][k] for k in frame_list]
         xml = _emit_label_symbol(label, frames_subset, images, movie_clips,
                                  img_symbol_names, mc_symbol_names,
                                  is_rawbin)
@@ -1023,16 +852,11 @@ def _write_character_assets(out_dir: Path, parsed: dict, atlas,
         label_actions_out.append((label, max(1, len(frames_subset))))
 
     # ── Stage-centring offset ────────────────────────────────────────────────
-    # Cocos world origin is wherever the source picks it (often the character's
-    # foot or origin of the spawning system); after Y-flip the content can end
-    # up jammed into Flash's top-left corner. Probe the first action's middle
-    # frame, find its bbox centre in Flash space, and shift so that centre
-    # lands at the stage centre.
     doc_w, doc_h = 390, 390
     sox = soy = 0.0
     if label_records:
-        _lbl, probe_mc, probe_s, probe_e = label_records[0]
-        probe_frame = (probe_s + probe_e) // 2
+        _lbl, probe_mc, probe_list = label_records[0]
+        probe_frame = probe_list[len(probe_list) // 2]
         bbox = _probe_frame_bbox(probe_mc, probe_frame, images, movie_clips,
                                  is_rawbin)
         if bbox.valid:
@@ -1082,15 +906,7 @@ def convert(bin_path: Path, pvr_path: Path, out_dir: Path,
 
 def convert_group(bins_pvrs: list, out_dir: Path, version: int, *,
                   group_name: str, resolution: int = 1536) -> None:
-    """Bundle multiple bin+pvr pairs into one package under a single subgroup,
-    matching the ZombieTutorialGroup.package / ZombieEgyptTombRaiserGroup.package
-    layouts.
-
-    `bins_pvrs` is a list of (bin_path, pvr_path, type_path, char_name,
-    id_prefix) tuples; one per character. When `type_path == 'effects'` the
-    resource lands under `images/initial/effects/`. Empty type_path drops the
-    category subfolder entirely.
-    """
+    """Bundle multiple bin+pvr pairs into one package under a single subgroup"""
     from fbin_parser import parse_binary
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1100,10 +916,7 @@ def convert_group(bins_pvrs: list, out_dir: Path, version: int, *,
         if parsed is None:
             raise RuntimeError(f"Failed to parse '{bin_path}'.")
         atlas = _load_atlas_pil(str(pvr_path))
-        # Per-character resource_id derived from category + char (matches
-        # POPANIM_<CATEGORY>_<CHAR> in the reference packages). The group name
-        # itself doesn't go into the per-resource ID. Empty type_path means no
-        # category prefix.
+        # Per-character resource_id derived from category + char
         cat = type_path.split('/')[0].upper() if type_path else ''
         cat_part = f"{cat}_" if cat else ''
         resource_id = f"POPANIM_{cat_part}{char_name.upper()}"
@@ -1127,25 +940,7 @@ def convert_group(bins_pvrs: list, out_dir: Path, version: int, *,
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _derive_defaults(bin_stem: str, *, force_effect: bool = False):
-    """Derive (subgroup_name, type_path, char_name, id_prefix) from the bin
-    file stem.
-
-    Routing rules:
-      - force_effect=True            -> images/initial/effects/<stem>/<stem>
-        (group mode flags any bin whose stem strictly extends another's stem
-        with `_`, regardless of what the suffix word is — `_bullet`, `_re`,
-        `_attack`, `_fire`, `_bo`, anything)
-      - contains 'zombie'            -> images/initial/zombie/<stem>/<stem>
-      - contains 'plant'             -> images/initial/plant/<stem>/<stem>
-      - otherwise                    -> images/initial/<stem>/<stem>
-
-    char_name keeps the full stem (no prefix stripping) so resource folders
-    line up with the source filename, matching the ZombieTutorialGroup /
-    ZombieEgyptTombRaiserGroup references.
-
-    In single-bin (non-group) mode there's nothing to detect an effect against,
-    so callers must pass `--type-path effects` explicitly for FX bins.
-    """
+    """Derive (subgroup_name, type_path, char_name, id_prefix) from the bin file stem."""
     stem = bin_stem.strip()
     low  = stem.lower()
 
@@ -1161,18 +956,12 @@ def _derive_defaults(bin_stem: str, *, force_effect: bool = False):
     char_name = low or stem
     type_path = category
 
-    # subgroup_name: PascalCase from words in the stem, prefixed by the
-    # category (Zombie/Plant/Effects) when one is detected; otherwise just the
-    # PascalCase stem.
+    # subgroup_name: PascalCase from words in the stem, prefixed by the category
     words = [p for p in re.split(r'[_\W]+', char_name) if p]
     pascal = ''.join(w.capitalize() for w in words)
     subgroup_name = (category.capitalize() + pascal) if category else pascal
 
-    # id_prefix produces `IMAGE_<CAT>_<CHAR>_` (single CHAR). The image
-    # symbol name is already `<char>_<wxh>`, so the final ID concatenates to
-    # `IMAGE_<CAT>_<CHAR>_<CHAR>_<wxh>` (2× CHAR + size). Doubling CHAR in
-    # the prefix produced a triple-repeat in the final IDs
-    # (e.g. IMAGE_APPLEMORTAR_3_APPLEMORTAR_3_APPLEMORTAR_3_130X122).
+    # id_prefix produces `IMAGE_<CAT>_<CHAR>_` (single CHAR).
     cat_part = f"{category.upper()}_" if category else ''
     id_prefix = f"IMAGE_{cat_part}{char_name.upper()}_"
     return subgroup_name, type_path, char_name, id_prefix
@@ -1197,10 +986,7 @@ def _pascal_stem(stem: str) -> str:
 
 
 def _discover_group_siblings(bin_path: Path) -> list:
-    """Find sibling `.bin` files in the same folder that belong to the same
-    character group — those whose stem starts with `<stem>_` (the base's
-    effects / variants, e.g. `zombie_slingshot_bullet`, `zombie_slingshot_re`).
-    Each must have a pairable atlas (.pvr/.png) next to it. Returned sorted."""
+    """Find sibling `.bin` files in the same folder that belong to the same character group"""
     base = bin_path.stem
     base_resolved = bin_path.resolve()
     sibs = []
@@ -1257,10 +1043,7 @@ def main():
         if not bp.exists():
             print(f"Error: no such file '{bp}'"); sys.exit(1)
 
-    # Auto-group: a lone --bin whose folder holds `<stem>_*.bin` siblings (the
-    # character's effects/variants) is bundled into one '<Stem>Group.package',
-    # matching how the real PvZ packages ship (zombie + its effects together).
-    # Only kicks in when the user isn't already being explicit (no --group, no
+    # Auto-group: a lone --bin whose folder holds `<stem>_*.bin` siblings
     # --pvr, no single-char overrides) and didn't pass --no-auto-group.
     if (len(bin_paths) == 1 and not args.group and not args.no_auto_group
             and not args.pvr and not args.subgroup
@@ -1293,10 +1076,7 @@ def main():
         if args.subgroup or args.char_name or args.id_prefix:
             print("Warning: --subgroup/--char-name/--id-prefix are ignored "
                   "with --group (per-bin defaults are used).")
-        # Resolve per-bin defaults. In group mode, also treat a bin whose stem
-        # strictly extends another bin's stem (e.g. `..._bullet`,
-        # `..._bone_hit`) as an effect of that bin — even if the suffix isn't
-        # in the known FX list. This catches "<zombie>_<effectname>" pairs.
+        # Resolve per-bin defaults.
         stems = [bp.stem.lower() for bp in bin_paths]
         force_effect = [False] * len(bin_paths)
         for i, si in enumerate(stems):
@@ -1318,8 +1098,7 @@ def main():
                           resolution=args.resolution)
         return
 
-    # Single-character mode: one package per --bin. Overrides apply only when
-    # exactly one bin was given (otherwise they'd collide).
+    # Single-character mode: one package per --bin.
     if len(bin_paths) > 1 and (args.subgroup or args.char_name or args.id_prefix):
         print("Error: --subgroup/--char-name/--id-prefix can only be used "
               "with a single --bin; use --group to bundle multiple.")

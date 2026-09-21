@@ -1,21 +1,6 @@
-"""
-pvr_loader.py
--------------
-Loads PVR texture files into pygame surfaces.
+"""Loads PVR texture files into pygame surfaces."""
 
-Supported formats
-=================
-PVR v2  (iOS / Cocos2d-x, magic 'PVR!' at offset 44)
-  - RGBA4444    pixel_type 0x10 / 0x0C
-  - RGBA8888    pixel_type 0x12 / 0x0D
-  - PVRTC4      pixel_type 0x19 / 0x18  (4bpp, numpy-accelerated)
-  - PVRTC2      pixel_type 0x17 / 0x16  (2bpp, numpy-accelerated)
-
-Dreamcast / Naomi PVRT  (GBIX / PVRT magic, handled via pypvr)
-  - All formats supported by pypvr (twiddled, VQ, palettes, YUV, etc.)
-  - Requires: pypvr.py in the same directory + Pillow + numpy
-"""
-
+import importlib.util
 import struct
 import logging
 
@@ -31,15 +16,7 @@ _CH_SCALE     = 17   # 4-bit → 8-bit channel scale factor
 # ── Public entry point ────────────────────────────────────────────────────────
 
 def load_pvr_texture(pvr_path: str):
-    """
-    Load any supported PVR file and return a pygame.Surface (RGBA).
-    Returns None on failure.
-
-    Detection order
-    ===============
-    1. Dreamcast/Naomi PVRT (contains 'GBIX' or 'PVRT' magic) → pypvr
-    2. iOS/Cocos2d-x PVR v2 ('PVR!' at offset 44)             → built-in decoder
-    """
+    """Load any supported PVR file and return a pygame.Surface (RGBA)."""
     try:
         import pygame
     except ImportError:
@@ -66,8 +43,7 @@ def load_pvr_texture(pvr_path: str):
 
 
 def convert_pvr_to_png(input_pvr_path) -> bool:
-    """Decode a PVR via `load_pvr_texture()` and write a PNG next to the
-    source (foo.pvr -> foo.png). Returns True on success."""
+    """Decode a PVR via `load_pvr_texture()` and write a PNG next to the source (foo.pvr -> foo.png)."""
     from pathlib import Path
     try:
         import pygame
@@ -100,14 +76,14 @@ def convert_pvr_to_png(input_pvr_path) -> bool:
 # ── Format detection ──────────────────────────────────────────────────────────
 
 def _detect_format(data: bytes) -> str:
-    # Dreamcast: starts with GBIX header or PVRT block anywhere near start
+    # iOS PVR v2: 'PVR!' magic at offset 44.
+    if len(data) >= 48 and data[44:48] == b'PVR!':
+        return 'ios_v2'
+    # Dreamcast: GBIX header, or a PVRT block anywhere
     if data[:4] in (b'GBIX', b'PVRT'):
         return 'dreamcast'
     if data.find(b'PVRT') != -1:
         return 'dreamcast'
-    # iOS PVR v2: 'PVR!' magic at offset 44
-    if len(data) >= 48 and data[44:48] == b'PVR!':
-        return 'ios_v2'
     return 'unknown'
 
 
@@ -122,9 +98,7 @@ def _load_dreamcast(data: bytes, pvr_path: str, pygame):
                   "Place pypvr.py in the same folder as pvr_loader.py.", pvr_path)
         return None
 
-    try:
-        from PIL import Image as PilImage
-    except ImportError:
+    if importlib.util.find_spec("PIL") is None:   # pypvr needs Pillow
         log.error("Pillow (PIL) is required for Dreamcast PVR decoding. "
                   "Run: pip install Pillow")
         return None
@@ -190,6 +164,22 @@ def _load_ios_v2(data: bytes, pvr_path: str, pygame):
 # ── RGBA4444 ──────────────────────────────────────────────────────────────────
 
 def _decode_rgba4444(data: bytes, width: int, height: int) -> bytes:
+    n = width * height
+    try:
+        import numpy as np
+    except ImportError:
+        return _decode_rgba4444_pure(data, width, height)
+    avail = min(n, len(data) // 2)
+    w = np.frombuffer(data, dtype='<u2', count=avail).astype(np.uint16)
+    out = np.zeros((n, 4), dtype=np.uint8)
+    out[:avail, 0] = ((w >> 12) & 0xF) * _CH_SCALE
+    out[:avail, 1] = ((w >>  8) & 0xF) * _CH_SCALE
+    out[:avail, 2] = ((w >>  4) & 0xF) * _CH_SCALE
+    out[:avail, 3] = ( w        & 0xF) * _CH_SCALE
+    return out.tobytes()
+
+
+def _decode_rgba4444_pure(data: bytes, width: int, height: int) -> bytes:
     n   = width * height
     out = bytearray(n * 4)
     for i in range(n):
@@ -197,15 +187,11 @@ def _decode_rgba4444(data: bytes, width: int, height: int) -> bytes:
         if b0 + 1 >= len(data):
             break
         w   = data[b0] | (data[b0 + 1] << 8)
-        r   = (w >> 12) & 0xF
-        g   = (w >>  8) & 0xF
-        b   = (w >>  4) & 0xF
-        a   =  w        & 0xF
         p   = i * 4
-        out[p]   = r * _CH_SCALE
-        out[p+1] = g * _CH_SCALE
-        out[p+2] = b * _CH_SCALE
-        out[p+3] = a * _CH_SCALE
+        out[p]   = ((w >> 12) & 0xF) * _CH_SCALE
+        out[p+1] = ((w >>  8) & 0xF) * _CH_SCALE
+        out[p+2] = ((w >>  4) & 0xF) * _CH_SCALE
+        out[p+3] = ( w        & 0xF) * _CH_SCALE
     return bytes(out)
 
 
@@ -217,71 +203,45 @@ def _decode_rgba8888(data: bytes, width: int, height: int) -> bytes:
 
 
 # ── PVRTC-I shared ────────────────────────────────────────────────────────────
-#
-# PVRTC v1 64-bit block layout (little-endian):
-#   bytes 0-3 : 32-bit modulation word — 16 texels × 2 bits, row-major
-#   bytes 4-7 : 32-bit color word
-#
-# Color word layout:
-#   bit  0      : modulation interpretation flag (0=standard, 1=punch-through)
-#   bits 1-14   : Color A (14-bit color value)
-#   bit  15     : Color A opacity flag (1=opaque, 0=translucent)
-#   bits 16-30  : Color B (15-bit color value)
-#   bit  31     : Color B opacity flag (1=opaque, 0=translucent)
-#
-# Color encoding within the value bits:
-#   Opaque  : RGB-555 (Color B) or RGB-554 (Color A) — alpha forced to 255
-#   Translucent: ARGB-3444 (Color B) or ARGB-3443 (Color A)
-#
-# Blocks are stored in Morton (Z-order) interleaving, NOT row-major.
-# Block (bx, by) lives at byte offset `morton(bx, by) * 8` in the pixel data.
-#
-# Bilinear: each block's two colors are anchored at the block CENTER (pixel
-# offset 2,2 within the block). For a pixel at offset (px, py) in block (bx, by):
-#   * px < 2  → sample from blocks (bx-1, *) and (bx, *)
-#   * px >= 2 → sample from blocks (bx, *)   and (bx+1, *)
-# Same logic on Y. Bilinear weights are (4 - fx) and fx where fx = (px + 2) & 3.
+
+def _morton_index(bx: int, by: int, blocks_x: int, blocks_y: int) -> int:
+    """Scalar reference for `_morton_table` (used by the pure-Python decoder so both paths agree on block order)."""
+    min_dim = min(blocks_x, blocks_y)
+    shift_count = (min_dim - 1).bit_length() if min_dim > 1 else 0
+    z = 0
+    src_bit = 1
+    dst_bit = 1
+    while src_bit < min_dim:
+        if by & src_bit: z |= dst_bit
+        if bx & src_bit: z |= (dst_bit << 1)
+        src_bit <<= 1
+        dst_bit <<= 2
+    # Trailing high-axis bits past the interleaved range
+    max_val = (bx if blocks_y < blocks_x else by) >> shift_count
+    return z | (max_val << (2 * shift_count))
+
 
 def _morton_table(blocks_x: int, blocks_y: int):
-    """
-    Precompute a (blocks_y, blocks_x) int32 array mapping each block position
-    to its Morton (Z-order) linear index, matching the PowerVR reference
-    `TwiddleUV(YSize, XSize, YPos, XPos)` exactly:
-
-        Twiddled[2i]     = YPos[i]   (Y bits at EVEN positions)
-        Twiddled[2i + 1] = XPos[i]   (X bits at ODD positions)
-
-    For non-square layouts, bits past the smaller dimension's range come from
-    the larger axis, shifted above the interleaved field — that matches the
-    reference's `MaxValue << (2*ShiftCount)` trailing OR.
-    """
+    """Precompute a (blocks_y, blocks_x) int32 array mapping each block position to its Morton"""
     import numpy as np
     min_dim = min(blocks_x, blocks_y)
     shift_count = (min_dim - 1).bit_length() if min_dim > 1 else 0
-    table = np.zeros((blocks_y, blocks_x), dtype=np.int32)
-    for by in range(blocks_y):
-        for bx in range(blocks_x):
-            z = 0
-            src_bit = 1
-            dst_bit = 1
-            while src_bit < min_dim:
-                if by & src_bit: z |= dst_bit
-                if bx & src_bit: z |= (dst_bit << 1)
-                src_bit <<= 1
-                dst_bit <<= 2
-            # Trailing high-axis bits past the interleaved range
-            max_val = (bx if blocks_y < blocks_x else by) >> shift_count
-            z |= max_val << (2 * shift_count)
-            table[by, bx] = z
-    return table
+    by, bx = np.indices((blocks_y, blocks_x), dtype=np.int64)
+    z = np.zeros((blocks_y, blocks_x), dtype=np.int64)
+    src_bit = 1
+    dst_bit = 1
+    while src_bit < min_dim:
+        z |= np.where(by & src_bit, dst_bit, 0)
+        z |= np.where(bx & src_bit, dst_bit << 1, 0)
+        src_bit <<= 1
+        dst_bit <<= 2
+    max_val = (bx if blocks_y < blocks_x else by) >> shift_count
+    z |= max_val << (2 * shift_count)
+    return z.astype(np.int32)
 
 
 def _decode_colorA(v14, opaque):
-    """Decode 14-bit Color A (numpy-vector friendly).  Returns (..., 4) uint8.
-
-    Opaque    : RGB-554  (5 bits R, 5 bits G, 4 bits B)
-    Translucent: ARGB-3443 (3 bits A, 4 bits R, 4 bits G, 3 bits B)
-    """
+    """Decode 14-bit Color A (numpy-vector friendly)."""
     import numpy as np
     r5o = (v14 >> 9) & 0x1F;  g5o = (v14 >> 4) & 0x1F;  b4o = v14 & 0xF
     a3t = (v14 >> 11) & 0x7;  r4t = (v14 >> 7) & 0xF
@@ -296,11 +256,7 @@ def _decode_colorA(v14, opaque):
 
 
 def _decode_colorB(v15, opaque):
-    """Decode 15-bit Color B (numpy-vector friendly).  Returns (..., 4) uint8.
-
-    Opaque    : RGB-555  (5 bits R, 5 bits G, 5 bits B)
-    Translucent: ARGB-3444 (3 bits A, 4 bits R, 4 bits G, 4 bits B)
-    """
+    """Decode 15-bit Color B (numpy-vector friendly)."""
     import numpy as np
     r5o = (v15 >> 10) & 0x1F; g5o = (v15 >> 5) & 0x1F; b5o = v15 & 0x1F
     a3t = (v15 >> 12) & 0x7;  r4t = (v15 >> 8) & 0xF
@@ -346,31 +302,14 @@ def _decode_pvrtc4(data: bytes, width: int, height: int) -> bytes:
     needed = bx * by * 8
     if len(data) < needed:
         data = data + bytes(needed - len(data))
-    try:
-        import numpy as np
+    if importlib.util.find_spec("numpy") is not None:
         return _pvrtc4_numpy(data, width, height, bx, by)
-    except ImportError:
-        log.debug("numpy not available – using pure-Python PVRTC4 decoder.")
-        return _pvrtc4_pure(data, width, height, bx, by)
+    log.debug("numpy not available – using pure-Python PVRTC4 decoder.")
+    return _pvrtc4_pure(data, width, height, bx, by)
 
 
 def _pvrtc4_numpy(data, width, height, blocks_x, blocks_y):
-    """
-    PVRTC v1 4bpp decoder.  Each block is 4×4 px / 8 bytes.
-
-    Fixes applied vs the v0 decoder:
-      1. Blocks are read in Morton (Z-order), not linear row-major.
-      2. Color word bits are split correctly: bit 0 = mod-mode flag,
-         bits 1-14 = Color A (14 bits), bit 15 = Color A opacity,
-         bits 16-30 = Color B (15 bits), bit 31 = Color B opacity.
-      3. Color decoding switches between opaque (RGB-554/555) and
-         translucent (ARGB-3443/3444) per the opacity flag.
-      4. Bilinear sampling uses the correct neighbouring block centres:
-         pixels in the left half of a block sample from (bx-1, bx);
-         pixels in the right half sample from (bx, bx+1).
-      5. Punch-through modulation: when the per-block mode flag is set,
-         modulation value 2 means alpha=0 (transparent); 1 means (A+B)/2.
-    """
+    """PVRTC v1 4bpp decoder."""
     import numpy as np
 
     table = _morton_table(blocks_x, blocks_y)
@@ -387,9 +326,7 @@ def _pvrtc4_numpy(data, width, height, blocks_x, blocks_y):
     ca = _decode_colorA(colA_v, colA_op)
     cb = _decode_colorB(colB_v, colB_op)
 
-    # Shifted views for bilinear neighbour lookup.  np.roll with +1 shifts
-    # contents DOWN/RIGHT — i.e. position (y, x) now holds the value that
-    # was at (y-1, x) or (y, x-1) — which is what we want for "look up/left".
+    # Shifted views for bilinear neighbour lookup.
     ca_l  = np.roll(ca, +1, axis=1); ca_u  = np.roll(ca, +1, axis=0)
     ca_lu = np.roll(ca_u, +1, axis=1)
     ca_r  = np.roll(ca, -1, axis=1); ca_d  = np.roll(ca, -1, axis=0)
@@ -440,19 +377,16 @@ def _pvrtc4_numpy(data, width, height, blocks_x, blocks_y):
                    np.where(mod == 2, np.zeros_like(fa), fb)))
 
             c = np.where(mf, c_pt, c_std)
-            out[py::4, px::4] = np.clip(c, 0, 255).astype(np.uint8)[:blocks_y, :blocks_x]
+            # Crop to the real output size: textures under 8 px still decode on a 2x2 block grid
+            tgt = out[py::4, px::4]
+            tgt[...] = np.clip(c, 0, 255).astype(np.uint8)[:tgt.shape[0], :tgt.shape[1]]
     return out.tobytes()
 
 
 def _pvrtc4_pure(data, width, height, blocks_x, blocks_y):
     """Pure-Python fallback when numpy is unavailable.  Much slower."""
     def morton(bx, by):
-        nbits = max(blocks_x, blocks_y).bit_length()
-        z = 0
-        for i in range(nbits):
-            z |= ((bx >> i) & 1) << (2 * i)
-            z |= ((by >> i) & 1) << (2 * i + 1)
-        return z
+        return _morton_index(bx, by, blocks_x, blocks_y)
 
     def get(bx, by):
         bx %= blocks_x; by %= blocks_y

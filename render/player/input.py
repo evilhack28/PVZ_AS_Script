@@ -1,6 +1,4 @@
-"""
-Keyboard / mouse / window event handling.  Mixin for Player.
-"""
+"""Keyboard / mouse / window event handling."""
 
 import pygame
 
@@ -65,10 +63,6 @@ class InputMixin:
                     self._seek_from_mouse(event.pos[0], action_start, action_end)
             elif event.type == pygame.KEYDOWN:
                 # `?` toggles the help overlay regardless of keyboard layout.
-                # K_QUESTION is rarely emitted (most layouts produce K_SLASH +
-                # KMOD_SHIFT), so route via event.unicode which always reflects
-                # the produced character. Works even when an input prompt is
-                # active so the user can always discover the close action.
                 if event.unicode == '?':
                     if not (self._fps_input_active or self._frame_input_active):
                         self.show_help = not self.show_help
@@ -124,8 +118,7 @@ class InputMixin:
     def _handle_key(self, key, quit_req, anim_active,
                     frame_idx, action_start, action_end):
 
-        # Help overlay is modal: ESC or Q closes it (so does `?`, handled in
-        # _handle_events). Other keys are swallowed.
+        # Help overlay is modal: ESC or Q closes it (so does `?`, handled in _handle_events).
         if self.show_help:
             if key in (pygame.K_ESCAPE, pygame.K_q):
                 self.show_help = False
@@ -214,6 +207,10 @@ class InputMixin:
             self.paused = True
         elif key == pygame.K_l:
             self.loop = not self.loop
+        elif key == pygame.K_d:
+            # Toggle between fixed and game (buggy) number decoding, keeping action and frame.
+            if self._toggle_game_data(frame_idx):
+                anim_active = False
         elif key == pygame.K_k:
             # Toggle hiding the 'butter' sprite (covers the kungfu zombies' face)
             self.hide_butter = not self.hide_butter
@@ -221,8 +218,7 @@ class InputMixin:
             self._gif_msg = f"Butter: {'HIDDEN' if self.hide_butter else 'SHOWN'}"
             self._gif_msg_ttl = 120
         elif key == pygame.K_c:
-            # Cycle costume modes: ALL -> NONE -> 1 -> 2 -> ... -> ALL.
-            # Cycle only has 'all' when the model has no costume swap slots.
+            # Cycle costume modes: ALL -> NONE -> 1 -> 2 -> ...
             if len(self.costume_cycle) <= 1:
                 self._gif_msg = "No costumes on this model"
                 self._gif_msg_ttl = 120
@@ -241,7 +237,7 @@ class InputMixin:
         elif key == pygame.K_4:
             self._fps_input_active = True
             self._fps_input_buf    = str(self.fps_custom)
-            self._gif_msg = f"Custom FPS - type value, Enter to confirm"
+            self._gif_msg = "Custom FPS - type value, Enter to confirm"
             self._gif_msg_ttl = 999
         elif key == pygame.K_g:
             self._export_gif_now()

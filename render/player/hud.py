@@ -1,17 +1,8 @@
-"""
-HUD overlay + action picker drawing.
-Lives on the Player class as a mixin; consumes self.screen, self.font, self.playlist etc.
-
-Layout
-------
-Top-left      : row of status pills (action, frame, fps mode, speed, loop/pause).
-Bottom-left   : scrub bar with frame labels; clickable (hit-tested in input.py
-                via the `_scrub_bar_rect` field stored on the player).
-Bottom-right  : "Press ? for keys" hint.
-Centre        : help overlay (toggled with `?`) and the frame/fps input prompts.
-"""
+"""HUD overlay + action picker drawing."""
 
 import pygame
+
+import input_buffer
 
 
 # Flat palette — tweak here to retheme the HUD.
@@ -64,6 +55,9 @@ _HELP_SECTIONS = [
         ("H",              "Toggle HUD"),
         ("?",              "Toggle this help"),
     ]),
+    ("Data", [
+        ("D",              "Toggle game data (decode like the game's bug)"),
+    ]),
     ("Filters", [
         ("K",              "Toggle 'butter' (kungfu head sprite)"),
         ("C",              "Cycle costume (all / none / 1 / 2 …)"),
@@ -79,7 +73,7 @@ _HELP_SECTIONS = [
 ]
 
 
-def _draw_pill(surface, font, label, value, pos, value_color=None, value_bold=False):
+def _draw_pill(surface, font, label, value, pos, value_color=None):
     """Render a "Label  VALUE" pill at `pos`. Returns the rect (for stacking)."""
     pad_x, pad_y = 9, 5
     gap = 6
@@ -190,6 +184,11 @@ class HudMixin:
                                 (pill_x, pill_y), _PAL["pause"])
             pill_x = r.right + gap
 
+        if not input_buffer.TAG1_SIGNED:
+            r = _draw_icon_pill(self.screen, self.font, "GAME DATA",
+                                (pill_x, pill_y), _PAL["warn"])
+            pill_x = r.right + gap
+
         if getattr(self, "hide_butter", False):
             r = _draw_icon_pill(self.screen, self.font, "BUTTER OFF",
                                 (pill_x, pill_y), _PAL["good"])
@@ -205,15 +204,13 @@ class HudMixin:
                 label = f"HELMET {len(helm_rows) - hidden_n}/{len(helm_rows)}"
                 col   = _PAL["good"]
             else:
-                label = f"HELMET ALL"
+                label = "HELMET ALL"
                 col   = _PAL["pill_dim"]
             r = _draw_icon_pill(self.screen, self.font, label,
                                 (pill_x, pill_y), col)
             pill_x = r.right + gap
 
-        # Show a costume pill whenever the model HAS costume MCs, so the user
-        # sees the feature exists. Default 'ALL' is dim; any other mode is
-        # highlighted to make the active filter obvious.
+        # Show a costume pill whenever the model HAS costume MCs, so the user sees the feature exists.
         if getattr(self, "costume_all_mcs", set()):
             label    = f"CO {self._costume_mode_label()}"
             col      = _PAL["pill_dim"] if self.costume_mode == 'all' else _PAL["good"]
@@ -225,7 +222,8 @@ class HudMixin:
         meta_y = pill_y + r.height + 4
         fmt = "RawBin" if self.renderer.rawbin else "FBIN"
         meta_txt = (f"{fmt}  mc {mc_idx}  frames {len(mc['frames'])}  "
-                    f"action {action_start}-{action_end}  "
+                    f"action {action_start}-{action_end} (mc frame "
+                    f"{self._mc_frame(frame_idx)})  "
                     f"render {clk_fps:.0f}fps")
         meta_surf = self.font.render(meta_txt, True, _PAL["pill_dim"])
         self.screen.blit(meta_surf, (10, meta_y))
@@ -256,7 +254,6 @@ class HudMixin:
         self.screen.blit(lbl_cur, (cx, bar_y - lbl_cur.get_height() - 2))
 
         # Expose the bar rect for the input handler's click-to-seek.
-        # Bias the hit-test slightly above and below so the bar is easy to hit.
         self._scrub_bar_rect = pygame.Rect(bar_x, bar_y - 4, bar_w, bar_h + 8)
 
         # ── "Press ? for keys" hint (bottom-right) ────────────────────────────
@@ -407,17 +404,14 @@ class HudMixin:
             y += row_h
 
     def _draw_helmet_picker(self) -> None:
-        """Checkbox picker for helmet variants. Each row is one armor MC.
-        ENTER/SPACE toggles, A shows all, X hides all, M/ESC closes.
-        Family names (cone/bucket/armor1…) head their groups."""
+        """Checkbox picker for helmet variants."""
         rows = getattr(self, "helmet_rows", [])
         if not rows:
             return
         sw, sh = self.screen.get_size()
         row_h  = self.cfg.hud_font_size + 5
 
-        # Build visual rows: a family-header row before each new family,
-        # then one row per variant. Headers are not selectable.
+        # Build visual rows: a family-header row before each new family, then one row per variant.
         visual: list = []
         last_family = None
         for i, r in enumerate(rows):

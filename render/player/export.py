@@ -1,9 +1,9 @@
-"""
-Export methods (GIF / sprite / atlas / JSON).  Mixin for Player.
-"""
+"""Export methods (GIF / sprite / atlas / JSON)."""
 
+import json
 import logging
 import os
+import re
 
 import pygame
 
@@ -16,6 +16,25 @@ try:
     from PIL import Image as PilImage
 except ImportError:
     PilImage = None
+
+
+_BAD_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def _safe_filename(name: str, fallback: str = "unnamed") -> str:
+    """Make `name` safe as a single path component on every OS"""
+    cleaned = _BAD_FILENAME_CHARS.sub("_", str(name)).strip(" .")
+    return cleaned or fallback
+
+
+def _unique_name(name: str, used: set) -> str:
+    """`name`, or `name_2`, `name_3`..."""
+    cand, n = name, 2
+    while cand.lower() in used:
+        cand = f"{name}_{n}"
+        n += 1
+    used.add(cand.lower())
+    return cand
 
 
 class ExportMixin:
@@ -33,19 +52,19 @@ class ExportMixin:
             return
 
         mc         = self.movie_clips[mc_idx]
-        last_frame = max(0, len(mc['frames']) - 1)
-        a_start, a_end = self._clamp_action_range(action, last_frame)
+        frame_seq  = self._action_frames(action)
 
         frame_rate = self._resolve_fps(action, mc)
         dur_ms     = max(1, int(1000 / frame_rate))
-        print(f"Exporting '{action['name']}' ({a_end - a_start + 1} frames)...")
-        frames_to_save = self._render_gif_frames(mc_idx, a_start, a_end)
+        print(f"Exporting '{action['name']}' ({len(frame_seq)} frames)...")
+        frames_to_save = self._render_gif_frames(mc_idx, frame_seq)
         if not frames_to_save:
             return
 
         out_dir  = os.path.join(self.cfg.output_dir, self.cfg.pvr_name)
         os.makedirs(out_dir, exist_ok=True)
-        out_name = os.path.join(out_dir, f"{self.cfg.pvr_name}_{action['name']}.gif")
+        out_name = os.path.join(
+            out_dir, f"{self.cfg.pvr_name}_{_safe_filename(action['name'])}.gif")
         try:
             self._save_gif_fast(frames_to_save, out_name, dur_ms,
                                 self.cfg.background_rgb)
@@ -56,50 +75,62 @@ class ExportMixin:
             log.error("GIF export failed: %s", exc)
 
     def _export_all_gifs(self) -> None:
+        self._export_all_actions(transparent=False)
+
+    def _export_all_gifs_nobg(self) -> None:
+        self._export_all_actions(transparent=True)
+
+    def _export_all_actions(self, transparent: bool) -> None:
+        """Export every action as a GIF (opaque, or transparent `_nobg`)."""
         if PilImage is None:
             print("GIF export requires Pillow:  pip install Pillow")
             return
 
-        total = len(self.playlist);  saved = 0;  failed = 0
+        kind    = "transparent GIFs" if transparent else "GIFs"
+        suffix  = "_nobg" if transparent else ""
+        total   = len(self.playlist);  saved = 0;  failed = 0
         out_dir = os.path.join(self.cfg.output_dir, self.cfg.pvr_name)
         os.makedirs(out_dir, exist_ok=True)
-        print(f"\nExporting all {total} actions as GIFs -> {out_dir}/...")
-        self._gif_msg = f"Exporting all {total} actions...";  self._gif_msg_ttl = 999999
+        print(f"\nExporting all {total} actions as {kind} -> {out_dir}/...")
+        self._gif_msg = (f"Exporting all {total} actions"
+                         + (" (no bg)..." if transparent else "..."))
+        self._gif_msg_ttl = 999999
 
         # Show first frame while exporting
         action = self.playlist[self.current_idx]
         mc_idx = action['mc_idx']
         if 0 <= mc_idx < len(self.movie_clips):
-            mc         = self.movie_clips[mc_idx]
-            last_frame = max(0, len(mc['frames']) - 1)
-            a_start, _ = self._clamp_action_range(action, last_frame)
-            fb = BoundingBox()
-            self._render(mc_idx, a_start, fb, a_start, last_frame)
+            seq = self._action_frames(action)
+            self._cur_frames = seq
+            self._render(mc_idx, 0, BoundingBox(), 0, max(0, len(seq) - 1))
 
+        used_names: set = set()
         for idx, act in enumerate(self.playlist):
             mc_idx = act['mc_idx']
             if not (0 <= mc_idx < len(self.movie_clips)):
                 continue
 
             mc         = self.movie_clips[mc_idx]
-            last_frame = max(0, len(mc['frames']) - 1)
-            a_start, a_end = self._clamp_action_range(act, last_frame)
-            n_frames   = a_end - a_start + 1
+            frame_seq  = self._action_frames(act)
+            n_frames   = len(frame_seq)
 
             frame_rate = self._resolve_fps(act, mc)
             dur_ms     = max(1, int(1000 / frame_rate))
 
             self._gif_msg = f"Exporting {idx + 1}/{total}:  {act['name']}  ({n_frames} frames)"
             self._gif_msg_ttl = 999999
-            fb = BoundingBox()
-            self._render(mc_idx, a_start, fb, a_start, a_end)
+            self._cur_frames = frame_seq
+            self._render(mc_idx, 0, BoundingBox(), 0, max(0, n_frames - 1))
             pygame.event.pump()
 
-            frames_to_save = self._render_gif_frames(mc_idx, a_start, a_end)
+            frames_to_save = self._render_gif_frames(mc_idx, frame_seq,
+                                                     transparent=transparent)
             if not frames_to_save:
                 continue
 
-            out_name = os.path.join(out_dir, f"{self.cfg.pvr_name}_{act['name']}.gif")
+            stem     = _unique_name(f"{self.cfg.pvr_name}_{_safe_filename(act['name'])}{suffix}",
+                                    used_names)
+            out_name = os.path.join(out_dir, f"{stem}.gif")
             try:
                 self._save_gif_fast(frames_to_save, out_name, dur_ms,
                                     self.cfg.background_rgb)
@@ -109,74 +140,15 @@ class ExportMixin:
                 print(f"  [{idx + 1}/{total}] FAILED {out_name}: {exc}")
                 failed += 1
 
-        msg = f"Done - {saved} GIFs saved" + (f", {failed} failed" if failed else "")
-        print(msg); log.info(msg)
-        self._gif_msg = msg;  self._gif_msg_ttl = 300
-
-    def _export_all_gifs_nobg(self) -> None:
-        if PilImage is None:
-            print("GIF export requires Pillow:  pip install Pillow")
-            return
-
-        total = len(self.playlist);  saved = 0;  failed = 0
-        out_dir = os.path.join(self.cfg.output_dir, self.cfg.pvr_name)
-        os.makedirs(out_dir, exist_ok=True)
-        print(f"\nExporting all {total} actions as transparent GIFs -> {out_dir}/...")
-        self._gif_msg = f"Exporting all {total} actions (no bg)...";  self._gif_msg_ttl = 999999
-
-        action = self.playlist[self.current_idx]
-        mc_idx = action['mc_idx']
-        if 0 <= mc_idx < len(self.movie_clips):
-            mc         = self.movie_clips[mc_idx]
-            last_frame = max(0, len(mc['frames']) - 1)
-            a_start, _ = self._clamp_action_range(action, last_frame)
-            fb = BoundingBox()
-            self._render(mc_idx, a_start, fb, a_start, last_frame)
-
-        for idx, act in enumerate(self.playlist):
-            mc_idx = act['mc_idx']
-            if not (0 <= mc_idx < len(self.movie_clips)):
-                continue
-
-            mc         = self.movie_clips[mc_idx]
-            last_frame = max(0, len(mc['frames']) - 1)
-            a_start, a_end = self._clamp_action_range(act, last_frame)
-            n_frames   = a_end - a_start + 1
-
-            frame_rate = self._resolve_fps(act, mc)
-            dur_ms     = max(1, int(1000 / frame_rate))
-
-            self._gif_msg = f"Exporting {idx + 1}/{total}:  {act['name']}  ({n_frames} frames)"
-            self._gif_msg_ttl = 999999
-            fb = BoundingBox()
-            self._render(mc_idx, a_start, fb, a_start, a_end)
-            pygame.event.pump()
-
-            frames_to_save = self._render_gif_frames(mc_idx, a_start, a_end,
-                                                     transparent=True)
-            if not frames_to_save:
-                continue
-
-            out_name = os.path.join(out_dir, f"{self.cfg.pvr_name}_{act['name']}_nobg.gif")
-            try:
-                self._save_gif_fast(frames_to_save, out_name, dur_ms,
-                                    self.cfg.background_rgb)
-                print(f"  [{idx + 1}/{total}] Saved {out_name}  ({len(frames_to_save)} frames)")
-                saved += 1
-            except Exception as exc:
-                print(f"  [{idx + 1}/{total}] FAILED {out_name}: {exc}")
-                failed += 1
-
-        msg = f"Done - {saved} transparent GIFs saved" + (f", {failed} failed" if failed else "")
+        msg = (f"Done - {saved} {kind} saved"
+               + (f", {failed} failed" if failed else ""))
         print(msg); log.info(msg)
         self._gif_msg = msg;  self._gif_msg_ttl = 300
 
     # ── WebP export (full alpha — fixes GIF's jagged anti-alias edges) ────────
 
     def _export_webp_now(self) -> None:
-        """Export current action as animated WebP. RGBA, lossless — keeps the
-        same smooth anti-aliased edges the player shows (GIF can't, because it
-        has 1-bit alpha)."""
+        """Export current action as animated WebP."""
         if PilImage is None:
             print("WebP export requires Pillow:  pip install Pillow")
             return
@@ -187,25 +159,22 @@ class ExportMixin:
             return
 
         mc         = self.movie_clips[mc_idx]
-        last_frame = max(0, len(mc['frames']) - 1)
-        a_start, a_end = self._clamp_action_range(action, last_frame)
+        frame_seq  = self._action_frames(action)
 
         frame_rate = self._resolve_fps(action, mc)
         dur_ms     = max(1, int(1000 / frame_rate))
         print(f"Exporting WebP '{action['name']}' "
-              f"({a_end - a_start + 1} frames)...")
-        frames = self._render_gif_frames(mc_idx, a_start, a_end, transparent=True)
+              f"({len(frame_seq)} frames)...")
+        frames = self._render_gif_frames(mc_idx, frame_seq, transparent=True)
         if not frames:
             return
 
         out_dir  = os.path.join(self.cfg.output_dir, self.cfg.pvr_name)
         os.makedirs(out_dir, exist_ok=True)
-        out_name = os.path.join(out_dir,
-                                f"{self.cfg.pvr_name}_{action['name']}.webp")
+        out_name = os.path.join(
+            out_dir, f"{self.cfg.pvr_name}_{_safe_filename(action['name'])}.webp")
         try:
             # lossless=True + quality=100 + method=6 → max-quality, max-effort.
-            # method=6 is the slowest encoder setting but produces the
-            # smallest file at full quality.
             frames[0].save(
                 out_name, save_all=True,
                 append_images=frames[1:],
@@ -224,8 +193,7 @@ class ExportMixin:
     # ── MP4 export (opaque, needs imageio + ffmpeg) ───────────────────────────
 
     def _export_mp4_now(self) -> None:
-        """Export current action as H.264 MP4. Opaque (no alpha), but smooth
-        edges and tiny files. Needs `pip install imageio imageio-ffmpeg`."""
+        """Export current action as H.264 MP4."""
         if PilImage is None:
             print("MP4 export requires Pillow:  pip install Pillow")
             return
@@ -245,13 +213,12 @@ class ExportMixin:
             return
 
         mc         = self.movie_clips[mc_idx]
-        last_frame = max(0, len(mc['frames']) - 1)
-        a_start, a_end = self._clamp_action_range(action, last_frame)
+        frame_seq  = self._action_frames(action)
 
         frame_rate = self._resolve_fps(action, mc)
         print(f"Exporting MP4 '{action['name']}' "
-              f"({a_end - a_start + 1} frames)...")
-        frames = self._render_gif_frames(mc_idx, a_start, a_end, transparent=False)
+              f"({len(frame_seq)} frames)...")
+        frames = self._render_gif_frames(mc_idx, frame_seq, transparent=False)
         if not frames:
             return
 
@@ -263,21 +230,23 @@ class ExportMixin:
 
         out_dir  = os.path.join(self.cfg.output_dir, self.cfg.pvr_name)
         os.makedirs(out_dir, exist_ok=True)
-        out_name = os.path.join(out_dir,
-                                f"{self.cfg.pvr_name}_{action['name']}.mp4")
+        out_name = os.path.join(
+            out_dir, f"{self.cfg.pvr_name}_{_safe_filename(action['name'])}.mp4")
         try:
             writer = iio.get_writer(
                 out_name, fps=frame_rate, codec='libx264',
                 pixelformat='yuv420p', quality=8, macro_block_size=2,
             )
-            for f in frames:
-                if needs_pad:
-                    bg = PilImage.new('RGB', (pad_w, pad_h),
-                                      self.cfg.background_rgb)
-                    bg.paste(f, (0, 0))
-                    f = bg
-                writer.append_data(np.asarray(f))
-            writer.close()
+            try:
+                for f in frames:
+                    if needs_pad:
+                        bg = PilImage.new('RGB', (pad_w, pad_h),
+                                          self.cfg.background_rgb)
+                        bg.paste(f, (0, 0))
+                        f = bg
+                    writer.append_data(np.asarray(f))
+            finally:
+                writer.close()
             msg = f"Saved {out_name}  ({len(frames)} frames)"
             print(msg); log.info(msg)
             self._gif_msg     = f"Saved  {out_name}"
@@ -289,22 +258,21 @@ class ExportMixin:
 
     # ── Shared GIF frame renderer ─────────────────────────────────────────────
 
-    def _render_gif_frames(self, mc_idx: int, a_start: int, a_end: int,
+    def _render_gif_frames(self, mc_idx: int, frame_seq: list,
                            transparent: bool = False) -> list:
-        # Pass 1: dry-run to find the union bounding box so we know the tight
-        # crop region before allocating the real canvas. 2048² (16 MB) is
-        # plenty for the characters here and avoids the 67 MB / export cost
-        # of a 4096² probe.
+        """Render each MC frame in `frame_seq` (an action's frame list)."""
+        # Pass 1: find the union bounding box to size the canvas.
         PROBE  = 2048
         TARGET = 1024         # target px for the longer axis of the output
         cx, cy = PROBE // 2, PROBE // 2
 
         # Pass 1: probe at z=1.0 to find the natural (unzoomed) bounding box.
         base_z1    = (1.0, 0.0, 0.0, -1.0, float(cx), float(cy))
-        probe_surf = pygame.Surface((PROBE, PROBE))
+        # The bbox is accumulated from each sprite's transformed rect, not from the pixels blitted
+        probe_surf = pygame.Surface((1, 1))
         union_z1   = BoundingBox()
 
-        for f in range(a_start, a_end + 1):
+        for f in frame_seq:
             fb = BoundingBox()
             self.renderer.draw(probe_surf, mc_idx, f, base_z1, fb)
             if fb.valid:
@@ -316,9 +284,6 @@ class ExportMixin:
         del probe_surf
 
         # Auto-zoom: scale so the longest axis of the union bbox fits TARGET px.
-        # No minimum of 1.0 — large-effect animations (plantfood) are allowed to
-        # downscale below native so the canvas stays ≤ TARGET×TARGET and the
-        # export stays fast.  Small animations still get scaled up (up to 8×).
         if union_z1.valid:
             natural_w = max(1.0, union_z1.maxx - union_z1.minx)
             natural_h = max(1.0, union_z1.maxy - union_z1.miny)
@@ -360,7 +325,7 @@ class ExportMixin:
             canvas = pygame.Surface((crop_w, crop_h))
         frames: list = []
 
-        for f in range(a_start, a_end + 1):
+        for f in frame_seq:
             if transparent:
                 canvas.fill((0, 0, 0, 0))
                 self.renderer.draw(canvas, mc_idx, f, small_base)
@@ -404,6 +369,12 @@ class ExportMixin:
         atlas_pil = PilImage.frombytes("RGBA", (tw, th), raw_atlas)
         saved = 0;  skipped = 0;  skipped_dup = 0
         seen_rects: set = set()
+        used_names: set = set()
+        origin_count = sum(
+            1 for d in self.images
+            if int(d['tex_x']) == 0 and int(d['tex_y']) == 0
+            and int(d['width']) > 0 and int(d['height']) > 0
+        )
 
         for img_def in self.images:
             tx = int(img_def['tex_x']);  ty = int(img_def['tex_y'])
@@ -413,14 +384,8 @@ class ExportMixin:
                 skipped += 1;  continue
 
             # Skip placeholder sprites at (0,0) when many images share that origin.
-            if tx == 0 and ty == 0:
-                origin_count = sum(
-                    1 for d in self.images
-                    if int(d['tex_x']) == 0 and int(d['tex_y']) == 0
-                    and int(d['width']) > 0 and int(d['height']) > 0
-                )
-                if origin_count > 3:
-                    skipped += 1;  continue
+            if tx == 0 and ty == 0 and origin_count > 3:
+                skipped += 1;  continue
 
             rect_key = (tx, ty, w, h)
             if rect_key in seen_rects:
@@ -431,8 +396,9 @@ class ExportMixin:
             if sprite.getbbox() is None:
                 skipped += 1;  continue
 
-            raw_name  = img_def.get('name', f'sprite_{saved:04d}')
-            safe_name = raw_name.replace('/', '_').replace('\\', '_').replace(':', '_')
+            raw_name  = img_def.get('name') or f'sprite_{saved:04d}'
+            safe_name = _unique_name(_safe_filename(raw_name, f'sprite_{saved:04d}'),
+                                     used_names)
             sprite.save(os.path.join(out_dir, f"{safe_name}.png"), "PNG")
             saved += 1
 
@@ -446,16 +412,7 @@ class ExportMixin:
     # ── Frame dump (JSON export for debugging / external pipelines) ───────────
 
     def _dump_frames_json(self) -> None:
-        """
-        Press J to dump every frame of every action to a JSON file.
-
-        Each entry records exactly what the renderer draws - the same world
-        matrix (a,b,c,d,tx,ty) that gets passed to _draw_image.
-
-        Output: <pvr_name>_frames.json
-        """
-        import json
-
+        """Press J to dump every frame of every action to a JSON file."""
         os.makedirs(self.cfg.output_dir, exist_ok=True)
         out_path = os.path.join(self.cfg.output_dir, f"{self.cfg.pvr_name}_frames.json")
         print(f"Dumping frame data -> {out_path} ...")
@@ -476,116 +433,6 @@ class ExportMixin:
                 "offset_y": img.get("offset_y", 0.0),
             })
 
-        # walk the MC tree exactly like the renderer
-        rawbin = self.renderer.rawbin
-
-        def _collect(mc_idx, frame_num, parent_mat, depth=0, visited=None):
-            """Mirror renderer.draw() but collect draw calls instead of blitting."""
-            if depth > 32: return []
-            if visited is None: visited = frozenset()
-            if mc_idx in visited: return []
-            visited = visited | {mc_idx}
-
-            mc  = self.movie_clips[mc_idx]
-            if not mc['frames']: return []
-
-            idx      = frame_num % len(mc['frames'])
-            elements = list(mc['frames'][idx])
-            pa, pb, pc, pd, ptx, pty = parent_mat
-
-            # dedup (mirror renderer)
-            if rawbin:
-                seen = {}
-                for i, elem in enumerate(elements):
-                    tx_r = round(elem['matrix'][4], 1)
-                    ty_r = round(elem['matrix'][5], 1)
-                    key  = (elem.get('frame_index', -1), tx_r, ty_r)
-                    seen[key] = i
-                elements = [elements[i] for i in sorted(seen.values())]
-            else:
-                # Position-aware dedup matching renderer.py:225-235.
-                # Same image at different positions = legitimate symmetrical
-                # placement (eyes, paired limbs) — both must be kept.
-                seen_img = {}
-                for i, elem in enumerate(elements):
-                    if not elem['is_mc']:
-                        m   = elem['matrix']
-                        key = (elem['id'], round(m[4], 1), round(m[5], 1))
-                        seen_img[key] = i
-                kept = set(seen_img.values())
-                elements = [e for i, e in enumerate(elements)
-                            if e['is_mc'] or i in kept]
-
-            results = []
-            for elem in elements:
-                eid = elem['id']
-                if eid < 0: continue
-
-                la, lb, lc, ld, ltx, lty = elem['matrix']
-                na  = pa*la + pc*lb
-                nb  = pb*la + pd*lb
-                nc  = pa*lc + pc*ld
-                nd  = pb*lc + pd*ld
-                ntx = pa*ltx + pc*lty + ptx
-                nty = pb*ltx + pd*lty + pty
-                world = (na, nb, nc, nd, ntx, nty)
-
-                if elem['is_mc']:
-                    child_frame = elem.get('frame_index', -1)
-                    if eid >= len(self.movie_clips): continue
-                    child_mc = self.movie_clips[eid]
-
-                    if rawbin:
-                        if eid == 1 and child_frame >= 0:
-                            if child_frame < len(self.movie_clips):
-                                results.extend(_collect(child_frame, frame_num,
-                                                        world, depth+1, visited))
-                            elif child_frame < len(self.images):
-                                img = self.images[child_frame]
-                                if not (int(img['tex_x'])==0 and int(img['tex_y'])==0
-                                        and int(img['width'])<=4 and int(img['height'])<=4):
-                                    results.append({
-                                        "img_idx":     child_frame,
-                                        "img_name":    img.get("name",""),
-                                        "world_matrix": list(world),
-                                        "local_matrix": list(elem['matrix']),
-                                        "alpha":       float(elem.get("alpha", 1.0)),
-                                    })
-                        elif child_frame >= 0 and child_frame < len(self.images):
-                            img = self.images[child_frame]
-                            if not (int(img['tex_x'])==0 and int(img['tex_y'])==0
-                                    and int(img['width'])<=4 and int(img['height'])<=4):
-                                results.append({
-                                    "img_idx":     child_frame,
-                                    "img_name":    img.get("name",""),
-                                    "world_matrix": list(world),
-                                    "local_matrix": list(elem['matrix']),
-                                    "alpha":       float(elem.get("alpha", 1.0)),
-                                })
-                        elif len(child_mc['frames']) == 1 and child_frame >= 0:
-                            if child_frame < len(self.movie_clips):
-                                results.extend(_collect(child_frame, frame_num,
-                                                        world, depth+1, visited))
-                        else:
-                            nf = child_frame if child_frame >= 0 else frame_num
-                            results.extend(_collect(eid, nf, world, depth+1, visited))
-                    else:
-                        nf = child_frame if child_frame >= 0 else frame_num
-                        results.extend(_collect(eid, nf, world, depth+1, visited))
-                else:
-                    if eid < len(self.images):
-                        img = self.images[eid]
-                        if not (int(img['tex_x'])==0 and int(img['tex_y'])==0
-                                and int(img['width'])<=4 and int(img['height'])<=4):
-                            results.append({
-                                "img_idx":     eid,
-                                "img_name":    img.get("name",""),
-                                "world_matrix": list(world),
-                                "local_matrix": list(elem['matrix']),
-                                "alpha":       float(elem.get("alpha", 1.0)),
-                            })
-            return results
-
         # iterate actions → frames
         actions_out = []
 
@@ -594,8 +441,7 @@ class ExportMixin:
             if not (0 <= mc_idx < len(self.movie_clips)):
                 continue
             mc         = self.movie_clips[mc_idx]
-            last_frame = max(0, len(mc['frames']) - 1)
-            a_start, a_end = self._clamp_action_range(action, last_frame)
+            frame_seq  = self._action_frames(action)
 
             base = self._base_transform(0, 0)
             # Use 0,0 origin (downstream tools handle positioning) but keep scale/flip
@@ -603,15 +449,16 @@ class ExportMixin:
             base_for_dump = (a, b, c, d, 0.0, 0.0)
 
             frames_out = []
-            for f in range(a_start, a_end + 1):
-                draws = _collect(mc_idx, f, base_for_dump)
+            for f in frame_seq:
+                draws = self.renderer.collect_draws(mc_idx, f, base_for_dump)
                 frames_out.append(draws)
 
             actions_out.append({
                 "name":        action['name'],
                 "mc_idx":      mc_idx,
-                "frame_start": a_start,
-                "frame_end":   a_end,
+                "frame_start": 0,
+                "frame_end":   len(frame_seq) - 1,
+                "mc_frames":   list(frame_seq),
                 "fps":         self._resolve_fps(action, mc),
                 "frames":      frames_out,
             })
@@ -630,13 +477,7 @@ class ExportMixin:
     @staticmethod
     def _save_gif_fast(frames: list, path: str, duration_ms: int,
                        background_rgb: tuple = (40, 40, 40)) -> None:
-        """
-        Save an animated GIF with a shared global palette (one quantise pass).
-
-        RGBA frames produce a transparent GIF (index 255 = transparent).
-        RGB  frames produce an opaque GIF with background_rgb pinned at index 0
-        so the background colour never drifts due to palette quantisation.
-        """
+        """Save an animated GIF with a shared global palette (one quantise pass)."""
         if not frames:
             return
 
@@ -646,19 +487,14 @@ class ExportMixin:
         samples   = frames[::step][:16]
         w, h      = frames[0].size
 
-        # MAXCOVERAGE spreads palette entries across the full colour space so
-        # rare-but-saturated colours (e.g. blue tears on a yellow character)
-        # always get palette slots. MEDIANCUT allocates proportionally to pixel
-        # frequency: a 1%-blue frame gets 0 blue entries and those pixels map
-        # to the nearest warm colour (appearing grey/brown in the GIF).
+        # MAXCOVERAGE spreads palette entries across the full colour space so rare-but-saturated colours
         try:
             _qmethod = PilImage.Quantize.MAXCOVERAGE
         except AttributeError:
             _qmethod = 1  # integer fallback for Pillow < 9.1
 
         if has_alpha:
-            # Build palette from sample frames composited onto white,
-            # so transparent areas don't distort colour selection.
+            # Build palette from sample frames composited onto white
             combined = PilImage.new("RGB", (w * len(samples), h), (255, 255, 255))
             for i, s in enumerate(samples):
                 bg = PilImage.new("RGB", (w, h), (255, 255, 255))
@@ -673,10 +509,7 @@ class ExportMixin:
             pal_img.putpalette(palette)
 
             TRANS = 255
-            # Vectorise the alpha→transparent-index step. Numpy when available
-            # turns a per-pixel Python loop (one of the two hot paths in GIF
-            # export — the other is Pillow's quantise) into one C-level mask
-            # write. Bytes fallback uses bytes.translate which is also C-level.
+            # Vectorise the alpha→transparent-index step.
             try:
                 import numpy as np
                 _have_np = True
@@ -695,8 +528,7 @@ class ExportMixin:
                     p_arr[a_arr < 128] = TRANS
                     result = PilImage.frombytes("P", (w, h), p_arr.tobytes())
                 else:
-                    # Build an alpha→0/255 mask and OR it onto the palette
-                    # bytes — translate maps "low alpha" pixels to TRANS.
+                    # Map low-alpha pixels to the transparent index.
                     mask = bytes(255 if b < 128 else 0 for b in alpha.tobytes())
                     p_bytes = bytes(pb | mb for pb, mb in zip(p.tobytes(), mask))
                     result = PilImage.frombytes("P", (w, h), p_bytes)
@@ -713,8 +545,7 @@ class ExportMixin:
             combined = PilImage.new("RGB", (w * len(samples), h))
             for i, s in enumerate(samples):
                 combined.paste(s, (i * w, 0))
-            # 255 colours: palette index 0 is reserved for the exact background
-            # colour so it never drifts to a nearby green/brown shade.
+            # 255 colours; index 0 holds the exact background colour.
             quantised = combined.quantize(colors=255, dither=0, method=_qmethod)
             raw_pal   = list(quantised.getpalette())[:255 * 3]
             palette   = list(background_rgb) + raw_pal     # index 0 = background

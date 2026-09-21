@@ -37,6 +37,8 @@ python main.py --bin samples/char.bin
 
 Atlas can be `.pvr` OR `.png` — the loader sniffs the file.
 
+Add `--game-quirks` to decode FBIN numbers exactly like the game does (including its bug with small negative values, see `docs/GAME_FORMAT.md`). Press `D` in the player to switch and compare.
+
 ### Keys
 
 | Key | Action |
@@ -49,6 +51,7 @@ Atlas can be `.pvr` OR `.png` — the loader sniffs the file.
 | `L` | Toggle loop |
 | `I` | Action picker |
 | `K` | Hide `butter` accessory (kungfu zombies) |
+| `D` | Toggle game data (decode like the game's bug) and show how much differs |
 | `C` | Cycle costumes (plants with `custom_NN_*` variants) |
 | `G` / `A` / `Z` | Export current / all / all-no-bg as GIF |
 | `S` / `T` / `J` | Export sprites / atlas / frame JSON |
@@ -99,7 +102,7 @@ python tools/convert_from_package.py --package samples/Foo_5.package --out sampl
 python tools/convert_from_package.py --package samples/Foo_5.package/resource/images/initial/foo --out samples/test/
 ```
 
-Output: `<stem>.bin` (RawBin, 4-byte clip header — game-loadable) + `<stem>.pvr` (iOS PVR v2, RGBA8888).
+Output: `<stem>.bin` (RawBin by default, `--format fbin` for FBIN) + `<stem>.pvr` (iOS PVR v2, RGBA8888).
 
 Play it back in `main.py` to verify.
 
@@ -124,14 +127,16 @@ PVZ_AS_Script/
 ├── tools/
 │   ├── convert_to_package.py     .bin -> .package
 │   ├── convert_from_package.py   .package -> .bin + .pvr
-│   └── bin_diff.py               compare two .bin files structurally
-├── parsers/                FBIN + RawBin parsers
+│   ├── bin_diff.py               compare two .bin files structurally
+│   └── ghidra/                   headless Ghidra scripts used to recover the format
+├── parsers/                game_bin.py (the game's loader, ported) + input_buffer, fbin_parser
 ├── render/                 renderer + player subpackage
 ├── pvr/                    PVR/PVRTC texture loader
-└── samples/                example .bin / .pvr pairs
+├── docs/GAME_FORMAT.md     the bin format, playback and the game's decoding bug
+└── tests/                  python tests/test_game_format.py
 ```
 
-For implementation notes — format quirks, RawBin element dispatch, matrix conventions, conversion details — see **`CLAUDE.md`**.
+The format itself (FBIN / RawBin layout, actions, drawing rules) is documented in **`docs/GAME_FORMAT.md`**.
 
 ---
 
