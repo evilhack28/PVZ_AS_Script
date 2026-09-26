@@ -2,6 +2,7 @@
 
 import json
 import logging
+import math
 import os
 import re
 
@@ -13,9 +14,9 @@ log = logging.getLogger(__name__)
 
 # Optional GIF export
 try:
-    from PIL import Image as PilImage
+    from PIL import Image as PilImage, ImageChops
 except ImportError:
-    PilImage = None
+    PilImage = ImageChops = None
 
 
 _BAD_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -261,83 +262,72 @@ class ExportMixin:
     def _render_gif_frames(self, mc_idx: int, frame_seq: list,
                            transparent: bool = False) -> list:
         """Render each MC frame in `frame_seq` (an action's frame list)."""
-        # Pass 1: find the union bounding box to size the canvas.
-        PROBE  = 2048
         TARGET = 1024         # target px for the longer axis of the output
-        cx, cy = PROBE // 2, PROBE // 2
+        PAD    = 2            # px of margin kept around the tight pixel bbox
+        # Big positive origin so every sprite centre stays positive (int() truncation
+        # matches after the integer shift below) and nothing is ever clipped.
+        ORG    = 1 << 15
 
-        # Pass 1: probe at z=1.0 to find the natural (unzoomed) bounding box.
-        base_z1    = (1.0, 0.0, 0.0, -1.0, float(cx), float(cy))
-        # The bbox is accumulated from each sprite's transformed rect, not from the pixels blitted
-        probe_surf = pygame.Surface((1, 1))
-        union_z1   = BoundingBox()
+        def union_bbox(z: float) -> BoundingBox:
+            base       = (z, 0.0, 0.0, -z, float(ORG), float(ORG))
+            probe_surf = pygame.Surface((1, 1))
+            u          = BoundingBox()
+            for f in frame_seq:
+                fb = BoundingBox()
+                self.renderer.draw(probe_surf, mc_idx, f, base, fb)
+                if fb.valid:
+                    u.minx = min(u.minx, fb.minx);  u.miny = min(u.miny, fb.miny)
+                    u.maxx = max(u.maxx, fb.maxx);  u.maxy = max(u.maxy, fb.maxy)
+            return u
 
-        for f in frame_seq:
-            fb = BoundingBox()
-            self.renderer.draw(probe_surf, mc_idx, f, base_z1, fb)
-            if fb.valid:
-                union_z1.minx = min(union_z1.minx, fb.minx)
-                union_z1.miny = min(union_z1.miny, fb.miny)
-                union_z1.maxx = max(union_z1.maxx, fb.maxx)
-                union_z1.maxy = max(union_z1.maxy, fb.maxy)
+        # Pass 1: natural (z=1) bbox -> auto-zoom so the longest axis fits TARGET px.
+        u1 = union_bbox(1.0)
+        if not u1.valid:
+            return []
+        z = min(TARGET / max(1.0, u1.maxx - u1.minx, u1.maxy - u1.miny), 8.0)
 
-        del probe_surf
+        # Pass 2: re-measure at the final zoom (sprite rects are rounded per scale).
+        ub = union_bbox(z)
+        bx0 = int(math.floor(ub.minx)) - PAD
+        by0 = int(math.floor(ub.miny)) - PAD
+        crop_w = max(1, int(math.ceil(ub.maxx)) + PAD - bx0)
+        crop_h = max(1, int(math.ceil(ub.maxy)) + PAD - by0)
+        base   = (z, 0.0, 0.0, -z, float(ORG - bx0), float(ORG - by0))
 
-        # Auto-zoom: scale so the longest axis of the union bbox fits TARGET px.
-        if union_z1.valid:
-            natural_w = max(1.0, union_z1.maxx - union_z1.minx)
-            natural_h = max(1.0, union_z1.maxy - union_z1.miny)
-            z = min(TARGET / max(natural_w, natural_h), 8.0)
-        else:
-            z = 1.0
-
-        # Scale bbox linearly to the computed z (bbox scales around cx,cy).
-        base = (z, 0.0, 0.0, -z, float(cx), float(cy))
-        if union_z1.valid:
-            union_box          = BoundingBox()
-            union_box.minx     = cx + z * (union_z1.minx - cx)
-            union_box.miny     = cy + z * (union_z1.miny - cy)
-            union_box.maxx     = cx + z * (union_z1.maxx - cx)
-            union_box.maxy     = cy + z * (union_z1.maxy - cy)
-        else:
-            union_box = union_z1
-
-        # Compute tight crop rect
-        pad = 4
-        if union_box.valid:
-            bx0 = max(0,     int(union_box.minx) - pad)
-            by0 = max(0,     int(union_box.miny) - pad)
-            bx1 = min(PROBE, int(union_box.maxx) + pad)
-            by1 = min(PROBE, int(union_box.maxy) + pad)
-        else:
-            bx0, by0, bx1, by1 = cx - 64, cy - 64, cx + 64, cy + 64
-
-        crop_w = max(1, bx1 - bx0)
-        crop_h = max(1, by1 - by0)
-
-        # Pass 2: render onto a canvas exactly the crop size
-        pa, pb, pc, pd, ptx, pty = base
-        small_base = (pa, pb, pc, pd, ptx - bx0, pty - by0)
-
+        # Pass 3: render every frame, then trim to the real visible pixels.
         if transparent:
             canvas = pygame.Surface((crop_w, crop_h), pygame.SRCALPHA)
         else:
             canvas = pygame.Surface((crop_w, crop_h))
+        bg_rgb  = self.cfg.background_rgb
+        bg_img  = None if transparent else PilImage.new("RGB", (crop_w, crop_h), bg_rgb)
         frames: list = []
+        tight = [crop_w, crop_h, 0, 0]          # minx, miny, maxx, maxy of visible pixels
 
         for f in frame_seq:
             if transparent:
                 canvas.fill((0, 0, 0, 0))
-                self.renderer.draw(canvas, mc_idx, f, small_base)
+                self.renderer.draw(canvas, mc_idx, f, base)
                 raw = pygame.image.tostring(canvas, "RGBA")
-                frames.append(PilImage.frombytes("RGBA", (crop_w, crop_h), raw))
+                img = PilImage.frombytes("RGBA", (crop_w, crop_h), raw)
+                box = img.getchannel("A").getbbox()
             else:
-                canvas.fill(self.cfg.background_rgb)
-                self.renderer.draw(canvas, mc_idx, f, small_base)
+                canvas.fill(bg_rgb)
+                self.renderer.draw(canvas, mc_idx, f, base)
                 raw = pygame.image.tostring(canvas, "RGB")
-                frames.append(PilImage.frombytes("RGB", (crop_w, crop_h), raw))
-
+                img = PilImage.frombytes("RGB", (crop_w, crop_h), raw)
+                box = ImageChops.difference(img, bg_img).getbbox()
+            frames.append(img)
+            if box:
+                tight[0] = min(tight[0], box[0]);  tight[1] = min(tight[1], box[1])
+                tight[2] = max(tight[2], box[2]);  tight[3] = max(tight[3], box[3])
         del canvas
+
+        if tight[2] > tight[0] and tight[3] > tight[1]:
+            crop = (max(0, tight[0] - PAD), max(0, tight[1] - PAD),
+                    min(crop_w, tight[2] + PAD), min(crop_h, tight[3] + PAD))
+            if crop != (0, 0, crop_w, crop_h):
+                frames = [im.crop(crop) for im in frames]
         return frames
 
     # ── Atlas / sprite export ─────────────────────────────────────────────────
